@@ -1,0 +1,9 @@
+{
+  "check_rows": true,
+  "check_cols": true,
+  "check_diagonals": true,
+  "check_full_card": false,
+  "free_space": true,
+  "free_space_row": 2,
+  "free_space_col": 2
+}
