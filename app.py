@@ -404,18 +404,6 @@ with st.sidebar:
     if rules_img:
         st.image(rules_img, use_container_width=True)
 
-    st.markdown("### 📋 Winning Conditions")
-    rules = st.session_state.rules
-    prev  = dict(rules)
-    rules["check_rows"]      = st.checkbox("✅ Complete Row",         value=rules["check_rows"])
-    rules["check_cols"]      = st.checkbox("✅ Complete Column",      value=rules["check_cols"])
-    rules["check_diagonals"] = st.checkbox("✅ Diagonal",             value=rules["check_diagonals"])
-    rules["check_full_card"] = st.checkbox("✅ Full Card (Blackout)", value=rules["check_full_card"])
-    rules["free_space"]      = st.checkbox("⭐ Free Space (center)",  value=rules["free_space"])
-    if any(rules[k] != prev[k] for k in prev):
-        recalc_winners()
-        st.rerun()
-
     st.markdown("---")
     st.markdown("### 🔁 Round Management")
 
@@ -593,43 +581,73 @@ st.markdown(
 
 # ── Globally marked values strip ──────────────────────────────────────────────
 def get_global_marked_values() -> list[str]:
-    """Collect every distinct value that is manually marked on at least one card,
-    sorted numerically where possible."""
+    """All distinct values manually marked on any card, sorted numerically."""
     seen = set()
     for idx, card in enumerate(st.session_state.cards):
         for (r, c) in st.session_state.manual_marks.get(idx, set()):
             val = str(card.iloc[r, c]).strip().upper()
             if val not in ("FREE", "") and not val.startswith("?"):
                 seen.add(val)
-
     def sort_key(v):
-        try:
-            return (0, int(v))
-        except ValueError:
-            return (1, v)
-
+        try:    return (0, int(v))
+        except: return (1, v)
     return sorted(seen, key=sort_key)
 
+
+def unmark_global_value(val: str):
+    """Remove a specific value from every card's manual marks."""
+    val = val.strip().upper()
+    for idx, card in enumerate(st.session_state.cards):
+        marks = st.session_state.manual_marks.setdefault(idx, set())
+        nrows, ncols = card.shape
+        for r in range(nrows):
+            for c in range(ncols):
+                if str(card.iloc[r, c]).strip().upper() == val:
+                    marks.discard((r, c))
+
+
 marked_vals = get_global_marked_values()
-if marked_vals:
-    chips = " ".join(
-        f'<span style="display:inline-block;background:#28a745;color:white;'
-        f'padding:4px 12px;border-radius:15px;margin:2px;font-size:13px;'
-        f'font-weight:bold;">{v}</span>'
-        for v in marked_vals
-    )
+
+# Header row: label + Clear All button
+hdr_col, clr_col = st.columns([5, 1])
+with hdr_col:
     st.markdown(
-        f'<div style="background:#1e1e1e;border:1px solid #333;border-radius:10px;'
-        f'padding:10px 14px;margin-bottom:10px;">'
-        f'<span style="color:#aaa;font-size:13px;font-weight:600;margin-right:8px;">'
-        f'📋 Marked values ({len(marked_vals)}):</span>{chips}</div>',
+        f'<div style="font-size:14px;font-weight:600;color:#aaa;padding:6px 0 4px;">'
+        f'📋 Marked values ({len(marked_vals)})'
+        + ('&nbsp; &nbsp;<span style="font-size:12px;font-weight:400;color:#666;">'
+           '— click a value to unmark it from all cards</span>' if marked_vals else '')
+        + '</div>',
         unsafe_allow_html=True,
     )
+with clr_col:
+    if marked_vals:
+        if st.button("🗑️ Clear All", key="clear_all_marks", use_container_width=True):
+            st.session_state.manual_marks = {}
+            recalc_winners()
+            st.rerun()
+
+# Chips — each is a clickable button: click = unmark that value everywhere
+if marked_vals:
+    MAX_PER_ROW = 10
+    for row_start in range(0, len(marked_vals), MAX_PER_ROW):
+        row_vals  = marked_vals[row_start : row_start + MAX_PER_ROW]
+        chip_cols = st.columns(len(row_vals))
+        for col, val in zip(chip_cols, row_vals):
+            with col:
+                if st.button(
+                    f"{val} ✕",
+                    key=f"chip_{val}_{st.session_state.round}",
+                    type="primary",
+                    use_container_width=True,
+                ):
+                    unmark_global_value(val)
+                    recalc_winners()
+                    st.rerun()
 else:
     st.markdown(
-        '<div style="background:#1e1e1e;border:1px solid #333;border-radius:10px;'
-        'padding:10px 14px;margin-bottom:10px;color:#555;font-size:13px;">'
-        '📋 No values marked yet — click any cell to start.</div>',
+        '<div style="color:#555;font-size:13px;padding:6px 0 10px;">'
+        'No values marked yet — click any cell on the cards below to start.'
+        '</div>',
         unsafe_allow_html=True,
     )
 
