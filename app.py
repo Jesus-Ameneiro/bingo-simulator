@@ -83,10 +83,43 @@ for k, v in DEFAULTS.items():
 
 
 # ─── Game Logic ───────────────────────────────────────────────────────────────
+_BINGO = "BINGO"
+
 def _marked(card_df, r, c, called_set, rules):
+    """
+    Flexible matching that handles three common situations:
+      1. Cell "8"  vs called "B8"  → match  (number-only card, letter-prefixed call)
+      2. Cell "B8" vs called "B8"  → match  (both have prefix)
+      3. Cell "B8" vs called "8"   → match  (cell has prefix, call is bare number)
+    Works for any column count; BINGO-letter logic activates only for 5-col cards.
+    """
     if rules["free_space"] and r == rules["free_space_row"] and c == rules["free_space_col"]:
         return True
-    return str(card_df.iloc[r, c]).strip().upper() in called_set
+
+    cell_val = str(card_df.iloc[r, c]).strip().upper()
+    ncols    = card_df.shape[1]
+
+    # Direct match (covers cases 2 and 3 when both sides are the same format)
+    if cell_val in called_set:
+        return True
+
+    # BINGO-prefix bridge for 5-column cards
+    if ncols == 5 and c < 5:
+        letter = _BINGO[c]
+        # Case 1 – cell is bare number, called has letter prefix (e.g. "8" vs "B8")
+        if f"{letter}{cell_val}" in called_set:
+            return True
+        # Case 3 – cell has letter prefix, called is bare number (e.g. "B8" vs "8")
+        if cell_val.startswith(letter) and cell_val[1:] in called_set:
+            return True
+
+    # Generic fallback – strip any single leading alpha from each called value and compare
+    for called in called_set:
+        if len(called) >= 2 and called[0].isalpha() and not called[0].isdigit():
+            if called[1:] == cell_val:
+                return True
+
+    return False
 
 
 def check_bingo(card_df, called_values, rules):
