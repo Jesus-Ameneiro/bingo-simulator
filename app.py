@@ -43,7 +43,8 @@ st.markdown("""
         font-size:        14px    !important;
         min-height:       46px    !important;
         border-radius:    6px     !important;
-        padding:          4px 2px !important;
+        padding:          4px 0px !important;
+        width:            100%    !important;
     }
     button[data-testid="baseButton-primary"]:hover {
         background-color: #218838 !important;
@@ -51,24 +52,41 @@ st.markdown("""
     }
     button[data-testid="baseButton-primary"] p {
         white-space: nowrap   !important;
-        overflow:    hidden   !important;
+        overflow:    visible  !important;
         font-size:   14px     !important;
         margin:      0        !important;
+        line-height: 1.2      !important;
     }
 
     /* ── Gray = unmarked cell (secondary button) ── */
     button[data-testid="baseButton-secondary"] {
-        font-size:     14px  !important;
-        min-height:    46px  !important;
-        border-radius: 6px   !important;
+        font-size:     14px    !important;
+        min-height:    46px    !important;
+        border-radius: 6px     !important;
         color:         #343a40 !important;
-        padding:       4px 2px !important;
+        padding:       4px 0px !important;
+        width:         100%    !important;
     }
     button[data-testid="baseButton-secondary"] p {
         white-space: nowrap   !important;
-        overflow:    hidden   !important;
+        overflow:    visible  !important;
         font-size:   14px     !important;
         margin:      0        !important;
+        line-height: 1.2      !important;
+    }
+
+    /* ── Squeeze column gaps inside card containers ── */
+    div[data-testid="stVerticalBlockBorderWrapper"]
+        div[data-testid="stHorizontalBlock"] {
+        gap: 4px !important;
+    }
+    div[data-testid="stVerticalBlockBorderWrapper"]
+        div[data-testid="stHorizontalBlock"]
+        div[data-testid="column"] {
+        padding-left:  1px !important;
+        padding-right: 1px !important;
+        min-width:     0   !important;
+        overflow:      visible !important;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -555,7 +573,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-cols = st.columns(3, gap="large")
+cols = st.columns(3, gap="small")
 for i in range(len(st.session_state.cards)):
     with cols[i % 3]:
         render_card(i)
