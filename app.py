@@ -152,9 +152,35 @@ def is_marked(idx: int, r: int, c: int) -> bool:
     return (r, c) in st.session_state.manual_marks.get(idx, set())
 
 
-def toggle_mark(idx: int, r: int, c: int):
-    marks = st.session_state.manual_marks.setdefault(idx, set())
-    marks.discard((r, c)) if (r, c) in marks else marks.add((r, c))
+def toggle_mark_global(source_idx: int, r: int, c: int):
+    """
+    Toggle the clicked cell, then find the same value in every other card
+    and apply the same mark/unmark action — keeping all cards in sync.
+    """
+    source_card = st.session_state.cards[source_idx]
+    cell_val    = str(source_card.iloc[r, c]).strip().upper()
+
+    # Decide direction: are we marking or unmarking?
+    source_marks = st.session_state.manual_marks.setdefault(source_idx, set())
+    marking = (r, c) not in source_marks   # True → mark, False → unmark
+
+    # Apply to the source cell
+    source_marks.add((r, c)) if marking else source_marks.discard((r, c))
+
+    # Skip syncing FREE / empty placeholder values
+    if cell_val in ("FREE", "") or cell_val.startswith("?"):
+        return
+
+    # Propagate to every other card
+    for other_idx, other_card in enumerate(st.session_state.cards):
+        if other_idx == source_idx:
+            continue
+        other_marks = st.session_state.manual_marks.setdefault(other_idx, set())
+        nrows, ncols = other_card.shape
+        for rr in range(nrows):
+            for cc in range(ncols):
+                if str(other_card.iloc[rr, cc]).strip().upper() == cell_val:
+                    other_marks.add((rr, cc)) if marking else other_marks.discard((rr, cc))
 
 
 def check_bingo(idx: int) -> bool:
@@ -346,7 +372,7 @@ def render_card(idx: int):
                             type="primary" if marked else "secondary",
                             use_container_width=True,
                         ):
-                            toggle_mark(idx, r, c)
+                            toggle_mark_global(idx, r, c)
                             recalc_winners()
                             st.rerun()
 
@@ -559,10 +585,53 @@ render_pattern_card()
 
 st.markdown(
     '<div style="font-size:13px;color:#6c757d;margin:16px 0 8px;">'
-    '💡 Click any cell on the cards below to mark or unmark it.'
+    '💡 Click any cell on the cards below to mark or unmark it. '
+    'The same value will be marked automatically on all other cards.'
     '</div>',
     unsafe_allow_html=True,
 )
+
+# ── Globally marked values strip ──────────────────────────────────────────────
+def get_global_marked_values() -> list[str]:
+    """Collect every distinct value that is manually marked on at least one card,
+    sorted numerically where possible."""
+    seen = set()
+    for idx, card in enumerate(st.session_state.cards):
+        for (r, c) in st.session_state.manual_marks.get(idx, set()):
+            val = str(card.iloc[r, c]).strip().upper()
+            if val not in ("FREE", "") and not val.startswith("?"):
+                seen.add(val)
+
+    def sort_key(v):
+        try:
+            return (0, int(v))
+        except ValueError:
+            return (1, v)
+
+    return sorted(seen, key=sort_key)
+
+marked_vals = get_global_marked_values()
+if marked_vals:
+    chips = " ".join(
+        f'<span style="display:inline-block;background:#28a745;color:white;'
+        f'padding:4px 12px;border-radius:15px;margin:2px;font-size:13px;'
+        f'font-weight:bold;">{v}</span>'
+        for v in marked_vals
+    )
+    st.markdown(
+        f'<div style="background:#1e1e1e;border:1px solid #333;border-radius:10px;'
+        f'padding:10px 14px;margin-bottom:10px;">'
+        f'<span style="color:#aaa;font-size:13px;font-weight:600;margin-right:8px;">'
+        f'📋 Marked values ({len(marked_vals)}):</span>{chips}</div>',
+        unsafe_allow_html=True,
+    )
+else:
+    st.markdown(
+        '<div style="background:#1e1e1e;border:1px solid #333;border-radius:10px;'
+        'padding:10px 14px;margin-bottom:10px;color:#555;font-size:13px;">'
+        '📋 No values marked yet — click any cell to start.</div>',
+        unsafe_allow_html=True,
+    )
 
 st.divider()
 
