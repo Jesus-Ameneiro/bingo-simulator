@@ -1,9 +1,6 @@
 import streamlit as st
 import pandas as pd
 import json
-import base64
-import os
-import anthropic
 
 st.set_page_config(
     page_title="🎱 Bingo Manager",
@@ -44,6 +41,15 @@ st.markdown("""
         padding: 12px 16px; border-radius: 6px; margin: 8px 0;
         font-size: 14px; color: #1a1a2e;
     }
+    .grid-input input {
+        text-align: center !important;
+        font-weight: bold !important;
+        font-size: 15px !important;
+    }
+    div[data-testid="stTextInput"] input {
+        text-align: center;
+        font-weight: bold;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -51,12 +57,11 @@ st.markdown("""
 DEFAULTS = {
     "cards": [],
     "card_names": [],
-    "card_thumbs": [],      # base64 data-URLs for thumbnail display
+    "card_thumbs": [],      # base64 data-URLs
     "called_values": [],
     "winners": set(),
     "round": 1,
     "last_warning": None,
-    "rules_description": None,
     "rules": {
         "check_rows": True,
         "check_cols": True,
@@ -66,130 +71,15 @@ DEFAULTS = {
         "free_space_row": 2,
         "free_space_col": 2,
     },
+    # Entry state
+    "entry_grid_size": 5,
+    "entry_free_row": 2,
+    "entry_free_col": 2,
+    "entry_has_free": True,
 }
 for k, v in DEFAULTS.items():
     if k not in st.session_state:
         st.session_state[k] = v
-
-
-# ─── Anthropic client ─────────────────────────────────────────────────────────
-@st.cache_resource
-def get_client():
-    api_key = None
-    try:
-        api_key = st.secrets["ANTHROPIC_API_KEY"]
-    except Exception:
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        return None
-    return anthropic.Anthropic(api_key=api_key)
-
-
-def require_client():
-    client = get_client()
-    if client is None:
-        st.error(
-            "⚠️ **ANTHROPIC_API_KEY not found.**\n\n"
-            "Add it to your Streamlit secrets:\n"
-            "- Streamlit Cloud → App settings → Secrets → `ANTHROPIC_API_KEY = \"sk-ant-...\"`\n"
-            "- Locally: create `.streamlit/secrets.toml` with the same key."
-        )
-        st.stop()
-    return client
-
-
-# ─── Image + Vision helpers ───────────────────────────────────────────────────
-def file_to_b64(f) -> tuple:
-    """Return (base64_string, media_type) from an UploadedFile."""
-    raw = f.read()
-    name = f.name.lower()
-    if name.endswith(".png"):
-        mt = "image/png"
-    elif name.endswith(".gif"):
-        mt = "image/gif"
-    elif name.endswith(".webp"):
-        mt = "image/webp"
-    else:
-        mt = "image/jpeg"
-    return base64.standard_b64encode(raw).decode("utf-8"), mt
-
-
-def make_data_url(b64: str, mt: str) -> str:
-    return f"data:{mt};base64,{b64}"
-
-
-def call_vision(client, b64: str, mt: str, prompt: str, max_tokens: int = 1200) -> str:
-    resp = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=max_tokens,
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "image", "source": {"type": "base64", "media_type": mt, "data": b64}},
-                {"type": "text", "text": prompt},
-            ],
-        }],
-    )
-    text = resp.content[0].text.strip()
-    # Strip markdown code fences the model may have added
-    if "```" in text:
-        parts = text.split("```")
-        for part in parts:
-            part = part.strip()
-            if part.startswith("json"):
-                part = part[4:].strip()
-            if part.startswith("{"):
-                return part
-    return text
-
-
-# ─── Analysis prompts ─────────────────────────────────────────────────────────
-CARD_PROMPT = """You are reading a printed or digital bingo card.
-Carefully extract every cell value from the grid, row by row, left to right.
-
-Return ONLY a raw JSON object — no markdown, no explanation, nothing else outside the JSON:
-{
-  "grid": [
-    ["B1",  "I16", "N31", "G46", "O61"],
-    ["B2",  "I17", "N32", "G47", "O62"],
-    ["B3",  "I18", "FREE","G48", "O63"],
-    ["B4",  "I19", "N34", "G49", "O64"],
-    ["B5",  "I20", "N35", "G50", "O65"]
-  ],
-  "has_free_space": true,
-  "free_space_row": 2,
-  "free_space_col": 2
-}
-
-Rules:
-- grid: rectangular 2-D array — each inner array is one row of the card.
-- Copy values EXACTLY as printed (letters, numbers, hyphens, etc.).
-- If a cell is blank or is a free/wild space, write "FREE".
-- has_free_space: true if any cell is a free/wild space.
-- free_space_row / free_space_col: zero-indexed position of that cell (usually 2, 2 for 5x5)."""
-
-RULES_PROMPT = """You are reading a bingo rules card or sheet.
-Determine the winning conditions described or shown in this image.
-
-Return ONLY a raw JSON object — no markdown, no explanation, nothing else:
-{
-  "check_rows":      true,
-  "check_cols":      true,
-  "check_diagonals": false,
-  "check_full_card": false,
-  "free_space":      true,
-  "free_space_row":  2,
-  "free_space_col":  2,
-  "description":     "Complete any full row or column to win. Center cell is a free space."
-}
-
-Interpretation guide:
-- check_rows:      true if completing any horizontal row wins.
-- check_cols:      true if completing any vertical column wins.
-- check_diagonals: true if completing a diagonal wins.
-- check_full_card: true if ALL cells must be marked (blackout / coverall).
-- free_space:      true if there is a free/wild center space.
-- description:     one plain-language sentence summarising the rules."""
 
 
 # ─── Game Logic ───────────────────────────────────────────────────────────────
@@ -211,7 +101,7 @@ def check_bingo(card_df, called_values, rules):
         if any(all(m(r, c) for r in range(nrows)) for c in range(ncols)):
             return True
     if rules.get("check_diagonals") and nrows == ncols:
-        if all(m(i, i) for i in range(nrows)) or all(m(i, nrows - 1 - i) for i in range(nrows)):
+        if all(m(i, i) for i in range(nrows)) or all(m(i, nrows-1-i) for i in range(nrows)):
             return True
     if rules.get("check_full_card"):
         if all(m(r, c) for r in range(nrows) for c in range(ncols)):
@@ -235,14 +125,14 @@ def render_card_html(idx: int) -> str:
     rules     = st.session_state.rules
     is_winner = idx in st.session_state.winners
 
-    called_set  = {str(v).strip().upper() for v in called}
+    called_set   = {str(v).strip().upper() for v in called}
     nrows, ncols = card.shape
 
-    border = "3px solid #ffd700" if is_winner else "2px solid #dee2e6"
-    shadow = "0 0 22px rgba(255,215,0,0.45)" if is_winner else "0 2px 8px rgba(0,0,0,0.08)"
-    bg     = "#fffdf0" if is_winner else "#ffffff"
-    name_c = "#c8870a" if is_winner else "#343a40"
-    prefix = "🏆 " if is_winner else ""
+    border  = "3px solid #ffd700" if is_winner else "2px solid #dee2e6"
+    shadow  = "0 0 22px rgba(255,215,0,0.45)" if is_winner else "0 2px 8px rgba(0,0,0,0.08)"
+    bg      = "#fffdf0" if is_winner else "#ffffff"
+    name_c  = "#c8870a" if is_winner else "#343a40"
+    prefix  = "🏆 " if is_winner else ""
 
     thumb_html = (
         f'<img src="{thumb}" style="width:100%;max-height:90px;'
@@ -259,7 +149,6 @@ def render_card_html(idx: int) -> str:
         f'<table style="border-collapse:collapse;width:100%;table-layout:fixed;">'
     )
 
-    # BINGO header for 5-column cards
     if ncols == 5:
         html += "<tr>"
         for letter in "BINGO":
@@ -304,12 +193,17 @@ def render_card_html(idx: int) -> str:
 with st.sidebar:
     st.markdown("## ⚙️ Settings")
 
-    if st.session_state.rules_description:
-        st.markdown(
-            f'<div class="rules-box">📜 <strong>Active Rules</strong><br>'
-            f'{st.session_state.rules_description}</div>',
-            unsafe_allow_html=True,
-        )
+    # ── Rules image ──────────────────────────────────────────────────────────
+    st.markdown("### 📜 Rules Image")
+    st.caption("Upload the rules image for reference, then configure below.")
+    rules_img = st.file_uploader(
+        "Rules image",
+        type=["png", "jpg", "jpeg", "webp"],
+        key="rules_img",
+        label_visibility="collapsed",
+    )
+    if rules_img:
+        st.image(rules_img, use_container_width=True)
 
     st.markdown("### 📋 Winning Conditions")
     rules = st.session_state.rules
@@ -329,19 +223,20 @@ with st.sidebar:
     st.markdown("### 🔁 Round Management")
 
     if st.button("🔄 New Round — Keep Cards", use_container_width=True):
-        st.session_state.called_values   = []
-        st.session_state.winners         = set()
-        st.session_state.last_warning    = None
-        st.session_state.round          += 1
+        st.session_state.called_values  = []
+        st.session_state.winners        = set()
+        st.session_state.last_warning   = None
+        st.session_state.round         += 1
         st.rerun()
 
     if st.button("🆕 New Round — Upload New Cards", use_container_width=True):
-        for key in ("called_values", "cards", "card_names", "card_thumbs"):
-            st.session_state[key] = [] if key != "called_values" else []
-        st.session_state.winners          = set()
-        st.session_state.last_warning     = None
-        st.session_state.rules_description = None
-        st.session_state.round           += 1
+        st.session_state.called_values  = []
+        st.session_state.winners        = set()
+        st.session_state.cards          = []
+        st.session_state.card_names     = []
+        st.session_state.card_thumbs    = []
+        st.session_state.last_warning   = None
+        st.session_state.round         += 1
         st.rerun()
 
     st.markdown("---")
@@ -368,127 +263,143 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 
-# ─── Upload & Analysis ────────────────────────────────────────────────────────
-with st.expander("📤 Upload & Analyze Images", expanded=not bool(st.session_state.cards)):
+# ─── Card Upload & Entry ──────────────────────────────────────────────────────
+with st.expander("➕ Add a Bingo Card", expanded=not bool(st.session_state.cards)):
 
-    # ── Rules image ──────────────────────────────────────────────────────────
-    st.markdown("#### 📜 Step 1 — Rules Image *(optional)*")
-    st.caption("Upload a photo or screenshot of the bingo rules. Claude will read and apply them automatically.")
+    left_col, right_col = st.columns([1, 1], gap="large")
 
-    rules_col, rules_prev_col = st.columns([2, 1])
-    with rules_col:
-        rules_img = st.file_uploader(
-            "Rules image",
+    # ── Left: image upload ────────────────────────────────────────────────────
+    with left_col:
+        st.markdown("#### 📷 Card Image")
+        st.caption("Upload the card photo — use it as reference while filling the grid.")
+
+        card_img = st.file_uploader(
+            "Card image",
             type=["png", "jpg", "jpeg", "webp"],
-            key="rules_img_upload",
+            key="card_img_upload",
             label_visibility="collapsed",
         )
-    with rules_prev_col:
-        if rules_img:
-            st.image(rules_img, caption="Rules preview", use_container_width=True)
 
-    if rules_img:
-        if st.button("🔍 Analyze Rules Image", use_container_width=True):
-            client = require_client()
-            rules_img.seek(0)
-            b64, mt = file_to_b64(rules_img)
-            with st.spinner("Claude is reading the rules…"):
-                try:
-                    raw    = call_vision(client, b64, mt, RULES_PROMPT, max_tokens=600)
-                    parsed = json.loads(raw)
-                    for key in ("check_rows", "check_cols", "check_diagonals",
-                                "check_full_card", "free_space",
-                                "free_space_row", "free_space_col"):
-                        if key in parsed:
-                            st.session_state.rules[key] = parsed[key]
-                    st.session_state.rules_description = parsed.get("description", "")
-                    recalc_winners()
-                    st.success(f"✅ Rules applied: *{st.session_state.rules_description}*")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Could not parse rules image: {e}\n\nRaw response:\n```\n{raw}\n```")
+        if card_img:
+            st.image(card_img, use_container_width=True, caption=card_img.name)
+        else:
+            st.markdown(
+                '<div style="border:2px dashed #ccc;border-radius:10px;padding:40px;'
+                'text-align:center;color:#999;font-size:14px;">📷 Card image will appear here</div>',
+                unsafe_allow_html=True,
+            )
 
-    st.markdown("---")
+        st.markdown("#### ⚙️ Grid Options")
+        cfg_col1, cfg_col2 = st.columns(2)
+        with cfg_col1:
+            grid_size = st.selectbox("Grid size", [5, 4, 3, 6], index=0, key="entry_grid_size_sel")
+        with cfg_col2:
+            card_name_input = st.text_input(
+                "Card name",
+                value=f"Card {len(st.session_state.cards) + 1}",
+                key="card_name_input",
+            )
 
-    # ── Card images ──────────────────────────────────────────────────────────
-    st.markdown("#### 🃏 Step 2 — Bingo Card Images")
-    st.caption("Upload one image per card. Claude will extract the grid values from each one.")
+        has_free = st.checkbox("⭐ Has free space", value=True, key="entry_has_free_cb")
+        if has_free:
+            fc1, fc2 = st.columns(2)
+            with fc1:
+                free_row = st.number_input("Free row (0-indexed)", 0, grid_size - 1,
+                                           value=min(2, grid_size - 1), key="entry_free_row_sel")
+            with fc2:
+                free_col = st.number_input("Free col (0-indexed)", 0, grid_size - 1,
+                                           value=min(2, grid_size - 1), key="entry_free_col_sel")
+        else:
+            free_row, free_col = -1, -1
 
-    card_imgs = st.file_uploader(
-        "Bingo card images",
-        type=["png", "jpg", "jpeg", "webp"],
-        accept_multiple_files=True,
-        key="card_img_upload",
-        label_visibility="collapsed",
-    )
+    # ── Right: grid entry form ─────────────────────────────────────────────────
+    with right_col:
+        st.markdown("#### ✏️ Fill in the Grid")
+        st.caption("Type each value exactly as it appears on the card.")
 
-    if card_imgs:
-        st.markdown(f"**{len(card_imgs)} card image(s) ready:**")
-        prev_cols = st.columns(min(len(card_imgs), 4))
-        for i, f in enumerate(card_imgs):
-            with prev_cols[i % 4]:
-                st.image(f, caption=f.name, use_container_width=True)
+        if grid_size == 5:
+            col_labels = list("BINGO")
+        else:
+            col_labels = [str(i + 1) for i in range(grid_size)]
 
-        if st.button("🔍 Analyze & Add All Cards", type="primary", use_container_width=True):
-            client   = require_client()
-            progress = st.progress(0, text="Starting…")
-            added, errors = 0, []
+        # Column headers
+        hdr_cols = st.columns(grid_size)
+        for ci, lbl in enumerate(col_labels):
+            with hdr_cols[ci]:
+                st.markdown(
+                    f'<div style="background:#1a1a2e;color:#ffd700;text-align:center;'
+                    f'font-weight:bold;font-size:16px;padding:6px;border-radius:5px;">{lbl}</div>',
+                    unsafe_allow_html=True,
+                )
 
-            for idx, f in enumerate(card_imgs):
-                progress.progress(idx / len(card_imgs), text=f"Analyzing {f.name}…")
-                try:
-                    f.seek(0)
-                    b64, mt = file_to_b64(f)
-                    raw     = call_vision(client, b64, mt, CARD_PROMPT, max_tokens=1200)
-                    parsed  = json.loads(raw)
+        # Input grid
+        grid_values = []
+        for r in range(grid_size):
+            row_cols = st.columns(grid_size)
+            row_vals = []
+            for c in range(grid_size):
+                with row_cols[c]:
+                    is_free_cell = has_free and r == free_row and c == free_col
+                    if is_free_cell:
+                        st.markdown(
+                            '<div style="background:#ffd700;color:#1a1a2e;text-align:center;'
+                            'font-weight:bold;font-size:18px;padding:8px;border-radius:5px;'
+                            'border:2px solid #ccc;">★</div>',
+                            unsafe_allow_html=True,
+                        )
+                        row_vals.append("FREE")
+                    else:
+                        val = st.text_input(
+                            f"r{r}c{c}",
+                            key=f"cell_{r}_{c}_{len(st.session_state.cards)}",
+                            label_visibility="collapsed",
+                            placeholder="—",
+                        )
+                        row_vals.append(val.strip() if val.strip() else f"?{r}{c}")
+            grid_values.append(row_vals)
 
-                    grid = parsed.get("grid", [])
-                    if not grid or not grid[0]:
-                        raise ValueError("Model returned an empty grid.")
+        st.markdown("")
+        if st.button("✅ Add This Card", type="primary", use_container_width=True):
+            # Build DataFrame
+            df = pd.DataFrame(grid_values).astype(str)
 
-                    df    = pd.DataFrame(grid).astype(str).applymap(str.strip)
-                    thumb = make_data_url(b64, mt)
-                    name  = f.name.rsplit(".", 1)[0]
+            # Build thumbnail data URL
+            thumb = ""
+            if card_img:
+                import base64
+                card_img.seek(0)
+                raw = card_img.read()
+                name_lower = card_img.name.lower()
+                mt = ("image/png" if name_lower.endswith(".png")
+                      else "image/webp" if name_lower.endswith(".webp")
+                      else "image/jpeg")
+                b64 = base64.standard_b64encode(raw).decode("utf-8")
+                thumb = f"data:{mt};base64,{b64}"
 
-                    # Use free-space position detected in card if no rules image was used
-                    if parsed.get("has_free_space") and not st.session_state.rules_description:
-                        st.session_state.rules["free_space"]     = True
-                        st.session_state.rules["free_space_row"] = parsed.get("free_space_row", 2)
-                        st.session_state.rules["free_space_col"] = parsed.get("free_space_col", 2)
+            st.session_state.cards.append(df)
+            st.session_state.card_names.append(card_name_input or f"Card {len(st.session_state.cards)}")
+            st.session_state.card_thumbs.append(thumb)
 
-                    st.session_state.cards.append(df)
-                    st.session_state.card_names.append(name)
-                    st.session_state.card_thumbs.append(thumb)
-                    added += 1
+            # Sync free space to rules
+            if has_free:
+                st.session_state.rules["free_space"]     = True
+                st.session_state.rules["free_space_row"] = free_row
+                st.session_state.rules["free_space_col"] = free_col
+            else:
+                st.session_state.rules["free_space"] = False
 
-                except Exception as e:
-                    errors.append(f"**{f.name}**: {e}")
-
-            progress.progress(1.0, text="Done!")
             recalc_winners()
-
-            if added:
-                st.success(f"✅ {added} card(s) added!")
-            for err in errors:
-                st.error(err)
-            if added:
-                st.rerun()
+            st.success(f"✅ '{card_name_input}' added!")
+            st.rerun()
 
 
 # ─── Game Area ────────────────────────────────────────────────────────────────
 if not st.session_state.cards:
     st.info(
-        "👆 Upload your bingo card images above and click **Analyze & Add All Cards**.\n\n"
-        "Optionally upload a rules image first so Claude can configure the winning conditions automatically."
+        "👆 Use the section above to add your first card.\n\n"
+        "Upload the card image as a reference, fill in the grid values, and click **Add This Card**."
     )
     st.stop()
-
-# — Rules summary —
-if st.session_state.rules_description:
-    st.markdown(
-        f'<div class="rules-box">📜 {st.session_state.rules_description}</div>',
-        unsafe_allow_html=True,
-    )
 
 # — Call form —
 st.markdown("### 📢 Call a Value")
