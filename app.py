@@ -1,6 +1,17 @@
 import streamlit as st
 import pandas as pd
 import base64
+import numpy as np
+from PIL import Image
+import io
+
+# ── OCR imports (graceful fallback if not installed) ──────────────────────────
+try:
+    import cv2
+    import pytesseract
+    _OCR_AVAILABLE = True
+except ImportError:
+    _OCR_AVAILABLE = False
 
 st.set_page_config(
     page_title="🎱 Bingo Manager",
@@ -91,6 +102,118 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# ─── OCR Engine ───────────────────────────────────────────────────────────────
+def _ocr_cell(cell_img: np.ndarray) -> str:
+    """Run tesseract on a single cropped cell. Returns cleaned number string."""
+    # Upscale small cells for better OCR accuracy
+    h, w = cell_img.shape[:2]
+    if h < 60:
+        cell_img = cv2.resize(cell_img, (w * 3, h * 3), interpolation=cv2.INTER_CUBIC)
+
+    # Grayscale + denoise
+    gray = cv2.cvtColor(cell_img, cv2.COLOR_BGR2GRAY) if len(cell_img.shape) == 3 else cell_img
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+
+    # Adaptive threshold — white text on dark or dark text on white both handled
+    thresh = cv2.adaptiveThreshold(
+        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 15, 8
+    )
+
+    # Tesseract: digits only, single-line mode
+    cfg = "--psm 7 --oem 3 -c tessedit_char_whitelist=0123456789"
+    raw = pytesseract.image_to_string(thresh, config=cfg).strip()
+    raw = "".join(ch for ch in raw if ch.isdigit())
+    return raw if raw else "?"
+
+
+def scan_card_from_image(pil_img: Image.Image, grid_size: int = 5) -> list[list[str]]:
+    """
+    Extract bingo card grid from a PIL image using OpenCV + tesseract.
+    Strategy:
+      1. Find the largest white/light rectangular region (the card body).
+      2. Detect the BINGO header row and crop it out.
+      3. Divide remaining area evenly into grid_size × grid_size cells.
+      4. OCR each cell; auto-detect the centre free space.
+    Returns a list[list[str]] grid.
+    """
+    img = np.array(pil_img.convert("RGB"))
+    img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+    h, w = img_bgr.shape[:2]
+
+    # ── Step 1: isolate the card grid area ───────────────────────────────────
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+
+    # Find the white grid body by looking for the largest white rectangle
+    # Threshold for light pixels (card background is white/near-white)
+    _, light_mask = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+    contours, _ = cv2.findContours(light_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    # Pick the largest contour that is reasonably square
+    best_rect = None
+    best_area = 0
+    for cnt in contours:
+        x, y, cw, ch = cv2.boundingRect(cnt)
+        area = cw * ch
+        aspect = cw / ch if ch > 0 else 0
+        if area > best_area and 0.5 < aspect < 2.0 and area > (w * h * 0.1):
+            best_area = area
+            best_rect = (x, y, cw, ch)
+
+    if best_rect is None:
+        # Fallback: use full image with small margin
+        margin = int(min(h, w) * 0.05)
+        best_rect = (margin, margin, w - 2 * margin, h - 2 * margin)
+
+    gx, gy, gw, gh = best_rect
+    card_crop = img_bgr[gy: gy + gh, gx: gx + gw]
+    ch2, cw2 = card_crop.shape[:2]
+
+    # ── Step 2: remove BINGO header row (top ~15% is usually the header) ─────
+    # Find the first horizontal band that contains mostly white (grid starts)
+    gray_card = cv2.cvtColor(card_crop, cv2.COLOR_BGR2GRAY)
+    row_brightness = gray_card.mean(axis=1)  # mean brightness per row
+    # Header band ends where brightness drops (darker grid lines appear)
+    header_end = 0
+    threshold_brightness = row_brightness.max() * 0.7
+    for i, b in enumerate(row_brightness):
+        if i > ch2 * 0.05 and b < threshold_brightness:
+            header_end = i
+            break
+    if header_end < ch2 * 0.05:
+        header_end = int(ch2 * 0.18)  # safe default
+
+    grid_crop = card_crop[header_end:, :]
+    gh2, gw2 = grid_crop.shape[:2]
+
+    # ── Step 3: divide into grid_size × grid_size cells ──────────────────────
+    cell_h = gh2 // grid_size
+    cell_w = gw2 // grid_size
+    padding = max(4, int(min(cell_h, cell_w) * 0.08))  # slight inner padding
+
+    grid: list[list[str]] = []
+    mid = grid_size // 2
+
+    for r in range(grid_size):
+        row: list[str] = []
+        for c in range(grid_size):
+            y1 = r * cell_h + padding
+            y2 = (r + 1) * cell_h - padding
+            x1 = c * cell_w + padding
+            x2 = (c + 1) * cell_w - padding
+            cell = grid_crop[max(0, y1):max(0, y2), max(0, x1):max(0, x2)]
+
+            # Centre cell → FREE space
+            if r == mid and c == mid:
+                row.append("FREE")
+                continue
+
+            val = _ocr_cell(cell) if cell.size > 0 else "?"
+            row.append(val)
+        grid.append(row)
+
+    return grid
+
+
 # ─── Default card data ────────────────────────────────────────────────────────
 def _default_cards():
     grids = [
@@ -123,11 +246,14 @@ if "cards" not in st.session_state:
     st.session_state.card_thumbs = [""] * len(_cards)
 
 _DEFAULTS = {
-    "manual_marks":  {},      # {card_idx: set of (r, c)}
-    "winners":       set(),
-    "round":         1,
-    "round_pattern": set(),   # set of (r, c) — required cells to win
-    "pattern_size":  5,
+    "manual_marks":   {},
+    "winners":        set(),
+    "round":          1,
+    "round_pattern":  set(),
+    "pattern_size":   5,
+    "ocr_grid":       None,   # list[list[str]] pending review
+    "ocr_thumb":      "",     # base64 data-URL of scanned image
+    "ocr_name":       "",
     "rules": {
         "check_rows":      True,
         "check_cols":      True,
@@ -509,112 +635,280 @@ st.markdown(f"""
 
 # ─── Add a Card ───────────────────────────────────────────────────────────────
 with st.expander("➕ Add a New Card", expanded=False):
-    left_col, right_col = st.columns([1, 1], gap="large")
 
-    with left_col:
-        st.markdown("#### 📷 Card Image *(optional)*")
-        card_img = st.file_uploader(
-            "Card image", type=["png", "jpg", "jpeg", "webp"],
-            key="new_card_img", label_visibility="collapsed",
-        )
-        if card_img:
-            st.image(card_img, use_container_width=True)
-        else:
-            st.markdown(
-                '<div style="border:2px dashed #ccc;border-radius:10px;padding:30px;'
-                'text-align:center;color:#aaa;">📷 Optional photo reference</div>',
-                unsafe_allow_html=True,
+    tab_scan, tab_manual = st.tabs(["📷 Scan from Image", "✏️ Enter Manually"])
+
+    # ════════════════════════════════════════════════════════════════════════
+    # TAB 1 — SCAN FROM IMAGE
+    # ════════════════════════════════════════════════════════════════════════
+    with tab_scan:
+        if not _OCR_AVAILABLE:
+            st.warning(
+                "⚠️ OCR libraries not installed. "
+                "Make sure `packages.txt` contains `tesseract-ocr` and "
+                "`requirements.txt` contains `pytesseract`, `opencv-python-headless`, "
+                "`Pillow`, and `numpy`, then redeploy."
             )
-
-        st.markdown("#### ⚙️ Options")
-        c1, c2 = st.columns(2)
-        with c1:
-            grid_size = st.selectbox("Grid size", [5, 4, 3, 6], index=0, key="new_card_size")
-        with c2:
-            new_name = st.text_input(
-                "Card name",
-                value=f"Card {len(st.session_state.cards) + 1}",
-                key="new_card_name",
-            )
-        has_free = st.checkbox("⭐ Has free space", value=True, key="new_has_free")
-        if has_free:
-            f1, f2 = st.columns(2)
-            with f1:
-                free_row = int(st.number_input("Free row (0-index)", 0, grid_size-1,
-                                               value=min(2, grid_size-1), key="new_fr"))
-            with f2:
-                free_col = int(st.number_input("Free col (0-index)", 0, grid_size-1,
-                                               value=min(2, grid_size-1), key="new_fc"))
         else:
-            free_row, free_col = -1, -1
+            scan_img_col, scan_ctrl_col = st.columns([1, 1], gap="large")
 
-    with right_col:
-        st.markdown("#### ✏️ Fill in the Grid")
-        st.caption("Type each value exactly as printed on the card.")
+            with scan_img_col:
+                st.markdown("#### 📷 Upload Card Image")
+                st.caption("Upload a clear photo or screenshot of the bingo card.")
+                scan_file = st.file_uploader(
+                    "Card image", type=["png", "jpg", "jpeg", "webp"],
+                    key="scan_img_upload", label_visibility="collapsed",
+                )
+                if scan_file:
+                    st.image(scan_file, use_container_width=True)
 
-        labels = list("BINGO") if grid_size == 5 else [str(i+1) for i in range(grid_size)]
-        hc = st.columns(grid_size)
-        for ci, lbl in enumerate(labels):
-            with hc[ci]:
+            with scan_ctrl_col:
+                st.markdown("#### ⚙️ Scan Options")
+                scan_size = st.selectbox("Grid size", [5, 4, 3, 6], index=0, key="scan_size")
+                scan_name = st.text_input(
+                    "Card name",
+                    value=f"Card {len(st.session_state.cards) + 1}",
+                    key="scan_name_input",
+                )
+                st.markdown("")
+
+                if scan_file and st.button(
+                    "🔍 Scan Card", type="primary",
+                    use_container_width=True, key="do_scan",
+                ):
+                    with st.spinner("Reading card…"):
+                        try:
+                            scan_file.seek(0)
+                            pil_img = Image.open(scan_file)
+                            grid    = scan_card_from_image(pil_img, scan_size)
+
+                            # Build thumbnail data-URL
+                            scan_file.seek(0)
+                            raw = scan_file.read()
+                            mt  = ("image/png" if scan_file.name.lower().endswith(".png")
+                                   else "image/webp" if scan_file.name.lower().endswith(".webp")
+                                   else "image/jpeg")
+                            thumb = "data:{};base64,{}".format(
+                                mt, base64.standard_b64encode(raw).decode()
+                            )
+                            st.session_state.ocr_grid  = grid
+                            st.session_state.ocr_thumb = thumb
+                            st.session_state.ocr_name  = scan_name
+                        except Exception as e:
+                            st.error(f"Scan failed: {e}")
+
+            # ── Review & edit scanned result ─────────────────────────────────
+            if st.session_state.ocr_grid is not None:
+                st.divider()
                 st.markdown(
-                    f'<div style="background:#1a1a2e;color:#ffd700;text-align:center;'
-                    f'font-weight:bold;font-size:15px;padding:6px;border-radius:5px;">{lbl}</div>',
+                    "#### ✅ Review Scanned Values"
+                )
+                st.caption(
+                    "The grid below was read from your image. "
+                    "Fix any errors before adding the card."
+                )
+
+                raw_grid = st.session_state.ocr_grid
+                size     = len(raw_grid)
+                mid      = size // 2
+
+                # BINGO column headers
+                labels = list("BINGO") if size == 5 else [str(i+1) for i in range(size)]
+                hc = st.columns(size)
+                for ci, lbl in enumerate(labels):
+                    with hc[ci]:
+                        st.markdown(
+                            f'<div style="background:#1a1a2e;color:#ffd700;text-align:center;'
+                            f'font-weight:bold;font-size:15px;padding:6px;border-radius:5px;">'
+                            f'{lbl}</div>',
+                            unsafe_allow_html=True,
+                        )
+
+                edited_grid = []
+                for r in range(size):
+                    rc   = st.columns(size)
+                    row  = []
+                    for c in range(size):
+                        with rc[c]:
+                            is_free = (r == mid and c == mid)
+                            if is_free:
+                                st.markdown(
+                                    '<div style="background:#ffd700;color:#1a1a2e;'
+                                    'text-align:center;font-weight:bold;font-size:18px;'
+                                    'padding:8px;border-radius:5px;border:2px solid #ccc;">'
+                                    '★</div>',
+                                    unsafe_allow_html=True,
+                                )
+                                row.append("FREE")
+                            else:
+                                cur = raw_grid[r][c] if raw_grid[r][c] != "?" else ""
+                                # Highlight uncertain reads in red
+                                if raw_grid[r][c] in ("?", ""):
+                                    st.markdown(
+                                        '<div style="background:#5c1010;height:4px;'
+                                        'border-radius:2px;margin-bottom:2px;"></div>',
+                                        unsafe_allow_html=True,
+                                    )
+                                v = st.text_input(
+                                    f"sr{r}c{c}",
+                                    value=cur,
+                                    key=f"scan_cell_{r}_{c}",
+                                    label_visibility="collapsed",
+                                    placeholder="?",
+                                )
+                                row.append(v.strip() if v.strip() else f"?{r}{c}")
+                    edited_grid.append(row)
+
+                bad_cells = sum(
+                    1 for r in range(size) for c in range(size)
+                    if edited_grid[r][c].startswith("?") and not (r == mid and c == mid)
+                )
+                if bad_cells:
+                    st.warning(
+                        f"⚠️ {bad_cells} cell(s) could not be read — shown with a red bar. "
+                        "Please fill them in manually above."
+                    )
+
+                confirm_col, discard_col = st.columns([2, 1])
+                with confirm_col:
+                    if st.button(
+                        "✅ Add This Card", type="primary",
+                        use_container_width=True, key="confirm_scan",
+                    ):
+                        df = pd.DataFrame(edited_grid).astype(str)
+                        st.session_state.cards.append(df)
+                        st.session_state.card_names.append(
+                            st.session_state.ocr_name or f"Card {len(st.session_state.cards)}"
+                        )
+                        st.session_state.card_thumbs.append(st.session_state.ocr_thumb)
+                        st.session_state.ocr_grid  = None
+                        st.session_state.ocr_thumb = ""
+                        st.session_state.ocr_name  = ""
+                        recalc_winners()
+                        st.success("Card added!")
+                        st.rerun()
+                with discard_col:
+                    if st.button("🗑️ Discard Scan", use_container_width=True, key="discard_scan"):
+                        st.session_state.ocr_grid = None
+                        st.rerun()
+
+    # ════════════════════════════════════════════════════════════════════════
+    # TAB 2 — MANUAL ENTRY
+    # ════════════════════════════════════════════════════════════════════════
+    with tab_manual:
+        left_col, right_col = st.columns([1, 1], gap="large")
+
+        with left_col:
+            st.markdown("#### 📷 Card Image *(optional)*")
+            card_img = st.file_uploader(
+                "Card image", type=["png", "jpg", "jpeg", "webp"],
+                key="new_card_img", label_visibility="collapsed",
+            )
+            if card_img:
+                st.image(card_img, use_container_width=True)
+            else:
+                st.markdown(
+                    '<div style="border:2px dashed #444;border-radius:10px;padding:30px;'
+                    'text-align:center;color:#666;">📷 Optional photo reference</div>',
                     unsafe_allow_html=True,
                 )
 
-        grid_vals = []
-        for r in range(grid_size):
-            rc = st.columns(grid_size)
-            row = []
-            for c in range(grid_size):
-                with rc[c]:
-                    is_fc = has_free and r == free_row and c == free_col
-                    if is_fc:
-                        st.markdown(
-                            '<div style="background:#ffd700;color:#1a1a2e;text-align:center;'
-                            'font-weight:bold;font-size:18px;padding:8px;border-radius:5px;'
-                            'border:2px solid #ccc;">★</div>',
-                            unsafe_allow_html=True,
-                        )
-                        row.append("FREE")
-                    else:
-                        v = st.text_input(
-                            f"r{r}c{c}",
-                            key=f"nc_{r}_{c}_{len(st.session_state.cards)}",
-                            label_visibility="collapsed",
-                            placeholder="—",
-                        )
-                        row.append(v.strip() if v.strip() else f"?{r}{c}")
-            grid_vals.append(row)
-
-        st.markdown("")
-        if st.button("✅ Add This Card", use_container_width=True, key="add_card_btn"):
-            df    = pd.DataFrame(grid_vals).astype(str)
-            thumb = ""
-            if card_img:
-                card_img.seek(0)
-                raw = card_img.read()
-                mt  = ("image/png" if card_img.name.lower().endswith(".png")
-                       else "image/webp" if card_img.name.lower().endswith(".webp")
-                       else "image/jpeg")
-                thumb = "data:{};base64,{}".format(
-                    mt, base64.standard_b64encode(raw).decode()
+            st.markdown("#### ⚙️ Options")
+            c1, c2 = st.columns(2)
+            with c1:
+                grid_size = st.selectbox("Grid size", [5, 4, 3, 6], index=0, key="new_card_size")
+            with c2:
+                new_name = st.text_input(
+                    "Card name",
+                    value=f"Card {len(st.session_state.cards) + 1}",
+                    key="new_card_name",
                 )
-
-            st.session_state.cards.append(df)
-            st.session_state.card_names.append(new_name or f"Card {len(st.session_state.cards)}")
-            st.session_state.card_thumbs.append(thumb)
-
+            has_free = st.checkbox("⭐ Has free space", value=True, key="new_has_free")
             if has_free:
-                st.session_state.rules["free_space"]     = True
-                st.session_state.rules["free_space_row"] = free_row
-                st.session_state.rules["free_space_col"] = free_col
+                f1, f2 = st.columns(2)
+                with f1:
+                    free_row = int(st.number_input(
+                        "Free row (0-index)", 0, grid_size-1,
+                        value=min(2, grid_size-1), key="new_fr",
+                    ))
+                with f2:
+                    free_col = int(st.number_input(
+                        "Free col (0-index)", 0, grid_size-1,
+                        value=min(2, grid_size-1), key="new_fc",
+                    ))
             else:
-                st.session_state.rules["free_space"] = False
+                free_row, free_col = -1, -1
 
-            recalc_winners()
-            st.success(f"✅ '{new_name}' added!")
-            st.rerun()
+        with right_col:
+            st.markdown("#### ✏️ Fill in the Grid")
+            st.caption("Type each value exactly as printed on the card.")
+
+            labels = list("BINGO") if grid_size == 5 else [str(i+1) for i in range(grid_size)]
+            hc = st.columns(grid_size)
+            for ci, lbl in enumerate(labels):
+                with hc[ci]:
+                    st.markdown(
+                        f'<div style="background:#1a1a2e;color:#ffd700;text-align:center;'
+                        f'font-weight:bold;font-size:15px;padding:6px;border-radius:5px;">'
+                        f'{lbl}</div>',
+                        unsafe_allow_html=True,
+                    )
+
+            grid_vals = []
+            for r in range(grid_size):
+                rc  = st.columns(grid_size)
+                row = []
+                for c in range(grid_size):
+                    with rc[c]:
+                        is_fc = has_free and r == free_row and c == free_col
+                        if is_fc:
+                            st.markdown(
+                                '<div style="background:#ffd700;color:#1a1a2e;text-align:center;'
+                                'font-weight:bold;font-size:18px;padding:8px;border-radius:5px;'
+                                'border:2px solid #ccc;">★</div>',
+                                unsafe_allow_html=True,
+                            )
+                            row.append("FREE")
+                        else:
+                            v = st.text_input(
+                                f"r{r}c{c}",
+                                key=f"nc_{r}_{c}_{len(st.session_state.cards)}",
+                                label_visibility="collapsed",
+                                placeholder="—",
+                            )
+                            row.append(v.strip() if v.strip() else f"?{r}{c}")
+                grid_vals.append(row)
+
+            st.markdown("")
+            if st.button("✅ Add This Card", use_container_width=True, key="add_card_btn"):
+                df    = pd.DataFrame(grid_vals).astype(str)
+                thumb = ""
+                if card_img:
+                    card_img.seek(0)
+                    raw = card_img.read()
+                    mt  = ("image/png" if card_img.name.lower().endswith(".png")
+                           else "image/webp" if card_img.name.lower().endswith(".webp")
+                           else "image/jpeg")
+                    thumb = "data:{};base64,{}".format(
+                        mt, base64.standard_b64encode(raw).decode()
+                    )
+
+                st.session_state.cards.append(df)
+                st.session_state.card_names.append(
+                    new_name or f"Card {len(st.session_state.cards)}"
+                )
+                st.session_state.card_thumbs.append(thumb)
+
+                if has_free:
+                    st.session_state.rules["free_space"]     = True
+                    st.session_state.rules["free_space_row"] = free_row
+                    st.session_state.rules["free_space_col"] = free_col
+                else:
+                    st.session_state.rules["free_space"] = False
+
+                recalc_winners()
+                st.success(f"✅ '{new_name}' added!")
+                st.rerun()
 
 
 # ─── Pattern card + Playing cards ────────────────────────────────────────────
