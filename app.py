@@ -214,36 +214,11 @@ def scan_card_from_image(pil_img: Image.Image, grid_size: int = 5) -> list[list[
     return grid
 
 
-# ─── Default card data ────────────────────────────────────────────────────────
-def _default_cards():
-    grids = [
-        [["5","19","38","50","73"],
-         ["8","20","37","56","65"],
-         ["10","25","FREE","49","68"],
-         ["15","18","32","53","72"],
-         ["4","23","35","58","75"]],
-
-        [["5","28","35","48","73"],
-         ["10","22","32","46","66"],
-         ["4","27","FREE","60","72"],
-         ["15","25","38","57","64"],
-         ["11","20","33","58","70"]],
-
-        [["15","24","43","50","63"],
-         ["7","25","45","49","65"],
-         ["6","26","FREE","60","70"],
-         ["11","29","38","54","61"],
-         ["9","28","35","48","67"]],
-    ]
-    names  = ["Card 1478", "Card 1479", "Card 1480"]
-    return [pd.DataFrame(g).astype(str) for g in grids], names
-
 # ─── Session State ────────────────────────────────────────────────────────────
 if "cards" not in st.session_state:
-    _cards, _names = _default_cards()
-    st.session_state.cards       = _cards
-    st.session_state.card_names  = _names
-    st.session_state.card_thumbs = [""] * len(_cards)
+    st.session_state.cards       = []
+    st.session_state.card_names  = []
+    st.session_state.card_thumbs = []
 
 _DEFAULTS = {
     "manual_marks":   {},
@@ -251,9 +226,10 @@ _DEFAULTS = {
     "round":          1,
     "round_pattern":  set(),
     "pattern_size":   5,
-    "ocr_grid":       None,   # list[list[str]] pending review
-    "ocr_thumb":      "",     # base64 data-URL of scanned image
+    "ocr_grid":       None,
+    "ocr_thumb":      "",
     "ocr_name":       "",
+    "ocr_pending":    [],     # list of {name, grid, thumb} awaiting review
     "rules": {
         "check_rows":      True,
         "check_cols":      True,
@@ -602,17 +578,6 @@ with st.sidebar:
         st.session_state.round        += 1
         st.rerun()
 
-    if st.button("🔄 New Round — Reset to Default Cards", use_container_width=True):
-        _cards, _names = _default_cards()
-        st.session_state.cards         = _cards
-        st.session_state.card_names    = _names
-        st.session_state.card_thumbs   = [""] * len(_cards)
-        st.session_state.manual_marks  = {}
-        st.session_state.winners       = set()
-        st.session_state.round_pattern = set()
-        st.session_state.round        += 1
-        st.rerun()
-
     if st.button("🆕 New Round — Clear All Cards", use_container_width=True):
         st.session_state.cards         = []
         st.session_state.card_names    = []
@@ -634,12 +599,16 @@ st.markdown(f"""
 
 
 # ─── Add a Card ───────────────────────────────────────────────────────────────
-with st.expander("➕ Add a New Card", expanded=False):
+no_cards = not bool(st.session_state.cards)
+with st.expander(
+    "📥 Load Cards" if no_cards else "➕ Add More Cards",
+    expanded=no_cards,
+):
 
     tab_scan, tab_manual = st.tabs(["📷 Scan from Image", "✏️ Enter Manually"])
 
     # ════════════════════════════════════════════════════════════════════════
-    # TAB 1 — SCAN FROM IMAGE
+    # TAB 1 — SCAN FROM IMAGE (multiple at once)
     # ════════════════════════════════════════════════════════════════════════
     with tab_scan:
         if not _OCR_AVAILABLE:
@@ -650,146 +619,190 @@ with st.expander("➕ Add a New Card", expanded=False):
                 "`Pillow`, and `numpy`, then redeploy."
             )
         else:
-            scan_img_col, scan_ctrl_col = st.columns([1, 1], gap="large")
-
-            with scan_img_col:
-                st.markdown("#### 📷 Upload Card Image")
-                st.caption("Upload a clear photo or screenshot of the bingo card.")
-                scan_file = st.file_uploader(
-                    "Card image", type=["png", "jpg", "jpeg", "webp"],
-                    key="scan_img_upload", label_visibility="collapsed",
+            if no_cards:
+                st.markdown(
+                    '<div style="background:#0f3460;border-radius:8px;padding:12px 16px;'
+                    'margin-bottom:14px;color:#e0e0e0;font-size:14px;">'
+                    '👋 <strong>Welcome!</strong> Upload all your bingo card images below '
+                    'to get started. You can select multiple files at once.'
+                    '</div>',
+                    unsafe_allow_html=True,
                 )
-                if scan_file:
-                    st.image(scan_file, use_container_width=True)
 
-            with scan_ctrl_col:
-                st.markdown("#### ⚙️ Scan Options")
+            # ── Options row ──────────────────────────────────────────────────
+            opt1, opt2 = st.columns([1, 2])
+            with opt1:
                 scan_size = st.selectbox("Grid size", [5, 4, 3, 6], index=0, key="scan_size")
-                scan_name = st.text_input(
-                    "Card name",
-                    value=f"Card {len(st.session_state.cards) + 1}",
-                    key="scan_name_input",
+            with opt2:
+                st.caption(
+                    "Each file will become one card. "
+                    "OCR reads the numbers automatically — you can fix errors before confirming."
                 )
-                st.markdown("")
 
-                if scan_file and st.button(
-                    "🔍 Scan Card", type="primary",
-                    use_container_width=True, key="do_scan",
+            # ── Multi-file uploader ───────────────────────────────────────────
+            scan_files = st.file_uploader(
+                "Upload card images",
+                type=["png", "jpg", "jpeg", "webp"],
+                accept_multiple_files=True,
+                key="scan_img_upload",
+                label_visibility="collapsed",
+            )
+
+            if scan_files:
+                # Thumbnail preview strip
+                prev_cols = st.columns(min(len(scan_files), 6))
+                for i, f in enumerate(scan_files):
+                    with prev_cols[i % 6]:
+                        st.image(f, use_container_width=True,
+                                 caption=f.name.rsplit(".", 1)[0])
+
+                st.markdown("")
+                if st.button(
+                    f"🔍 Scan All {len(scan_files)} Card(s)",
+                    type="primary", use_container_width=True, key="do_scan_all",
                 ):
-                    with st.spinner("Reading card…"):
+                    progress = st.progress(0, text="Starting scan…")
+                    pending  = []
+
+                    for i, f in enumerate(scan_files):
+                        progress.progress(i / len(scan_files), text=f"Scanning {f.name}…")
                         try:
-                            scan_file.seek(0)
-                            pil_img = Image.open(scan_file)
+                            f.seek(0)
+                            pil_img = Image.open(f)
                             grid    = scan_card_from_image(pil_img, scan_size)
 
-                            # Build thumbnail data-URL
-                            scan_file.seek(0)
-                            raw = scan_file.read()
-                            mt  = ("image/png" if scan_file.name.lower().endswith(".png")
-                                   else "image/webp" if scan_file.name.lower().endswith(".webp")
+                            f.seek(0)
+                            raw = f.read()
+                            mt  = ("image/png" if f.name.lower().endswith(".png")
+                                   else "image/webp" if f.name.lower().endswith(".webp")
                                    else "image/jpeg")
                             thumb = "data:{};base64,{}".format(
                                 mt, base64.standard_b64encode(raw).decode()
                             )
-                            st.session_state.ocr_grid  = grid
-                            st.session_state.ocr_thumb = thumb
-                            st.session_state.ocr_name  = scan_name
+                            pending.append({
+                                "name":  f.name.rsplit(".", 1)[0],
+                                "grid":  grid,
+                                "thumb": thumb,
+                            })
                         except Exception as e:
-                            st.error(f"Scan failed: {e}")
+                            st.warning(f"⚠️ Could not scan **{f.name}**: {e}")
 
-            # ── Review & edit scanned result ─────────────────────────────────
-            if st.session_state.ocr_grid is not None:
+                    progress.progress(1.0, text="Scan complete!")
+                    st.session_state.ocr_pending = pending
+                    st.rerun()
+
+            # ── Review all scanned cards ──────────────────────────────────────
+            pending = st.session_state.get("ocr_pending", [])
+            if pending:
                 st.divider()
                 st.markdown(
-                    "#### ✅ Review Scanned Values"
+                    f"#### ✅ Review {len(pending)} Scanned Card(s)"
                 )
                 st.caption(
-                    "The grid below was read from your image. "
-                    "Fix any errors before adding the card."
+                    "Each card grid is shown below. "
+                    "Fix any incorrect values (red bar = OCR was uncertain), "
+                    "then click **Confirm All Cards**."
                 )
 
-                raw_grid = st.session_state.ocr_grid
-                size     = len(raw_grid)
-                mid      = size // 2
+                all_edited = []
+                for card_idx, card_data in enumerate(pending):
+                    raw_grid = card_data["grid"]
+                    size     = len(raw_grid)
+                    mid      = size // 2
+                    thumb    = card_data["thumb"]
 
-                # BINGO column headers
-                labels = list("BINGO") if size == 5 else [str(i+1) for i in range(size)]
-                hc = st.columns(size)
-                for ci, lbl in enumerate(labels):
-                    with hc[ci]:
-                        st.markdown(
-                            f'<div style="background:#1a1a2e;color:#ffd700;text-align:center;'
-                            f'font-weight:bold;font-size:15px;padding:6px;border-radius:5px;">'
-                            f'{lbl}</div>',
-                            unsafe_allow_html=True,
-                        )
-
-                edited_grid = []
-                for r in range(size):
-                    rc   = st.columns(size)
-                    row  = []
-                    for c in range(size):
-                        with rc[c]:
-                            is_free = (r == mid and c == mid)
-                            if is_free:
+                    with st.container(border=True):
+                        head_col, name_col = st.columns([1, 3])
+                        with head_col:
+                            if thumb:
                                 st.markdown(
-                                    '<div style="background:#ffd700;color:#1a1a2e;'
-                                    'text-align:center;font-weight:bold;font-size:18px;'
-                                    'padding:8px;border-radius:5px;border:2px solid #ccc;">'
-                                    '★</div>',
+                                    f'<img src="{thumb}" style="width:100%;max-height:70px;'
+                                    f'object-fit:cover;border-radius:6px;" />',
                                     unsafe_allow_html=True,
                                 )
-                                row.append("FREE")
-                            else:
-                                cur = raw_grid[r][c] if raw_grid[r][c] != "?" else ""
-                                # Highlight uncertain reads in red
-                                if raw_grid[r][c] in ("?", ""):
-                                    st.markdown(
-                                        '<div style="background:#5c1010;height:4px;'
-                                        'border-radius:2px;margin-bottom:2px;"></div>',
-                                        unsafe_allow_html=True,
-                                    )
-                                v = st.text_input(
-                                    f"sr{r}c{c}",
-                                    value=cur,
-                                    key=f"scan_cell_{r}_{c}",
-                                    label_visibility="collapsed",
-                                    placeholder="?",
+                        with name_col:
+                            edited_name = st.text_input(
+                                "Card name",
+                                value=card_data["name"],
+                                key=f"ocr_name_{card_idx}",
+                                label_visibility="collapsed",
+                            )
+
+                        # Column headers
+                        labels = list("BINGO") if size == 5 else [str(i+1) for i in range(size)]
+                        hc = st.columns(size)
+                        for ci, lbl in enumerate(labels):
+                            with hc[ci]:
+                                st.markdown(
+                                    f'<div style="background:#1a1a2e;color:#ffd700;'
+                                    f'text-align:center;font-weight:bold;font-size:14px;'
+                                    f'padding:5px;border-radius:5px;">{lbl}</div>',
+                                    unsafe_allow_html=True,
                                 )
-                                row.append(v.strip() if v.strip() else f"?{r}{c}")
-                    edited_grid.append(row)
 
-                bad_cells = sum(
-                    1 for r in range(size) for c in range(size)
-                    if edited_grid[r][c].startswith("?") and not (r == mid and c == mid)
-                )
-                if bad_cells:
-                    st.warning(
-                        f"⚠️ {bad_cells} cell(s) could not be read — shown with a red bar. "
-                        "Please fill them in manually above."
-                    )
+                        edited_grid = []
+                        for r in range(size):
+                            rc  = st.columns(size)
+                            row = []
+                            for c in range(size):
+                                with rc[c]:
+                                    if r == mid and c == mid:
+                                        st.markdown(
+                                            '<div style="background:#ffd700;color:#1a1a2e;'
+                                            'text-align:center;font-weight:bold;font-size:18px;'
+                                            'padding:7px;border-radius:5px;">★</div>',
+                                            unsafe_allow_html=True,
+                                        )
+                                        row.append("FREE")
+                                    else:
+                                        cur = raw_grid[r][c] if raw_grid[r][c] != "?" else ""
+                                        uncertain = raw_grid[r][c] in ("?", "")
+                                        if uncertain:
+                                            st.markdown(
+                                                '<div style="background:#8b0000;height:3px;'
+                                                'border-radius:2px;margin-bottom:2px;"></div>',
+                                                unsafe_allow_html=True,
+                                            )
+                                        v = st.text_input(
+                                            f"ocr_{card_idx}_{r}_{c}",
+                                            value=cur,
+                                            key=f"ocr_cell_{card_idx}_{r}_{c}",
+                                            label_visibility="collapsed",
+                                            placeholder="?",
+                                        )
+                                        row.append(v.strip() if v.strip() else f"?{r}{c}")
+                            edited_grid.append(row)
 
-                confirm_col, discard_col = st.columns([2, 1])
+                        bad = sum(
+                            1 for r in range(size) for c in range(size)
+                            if edited_grid[r][c].startswith("?") and not (r == mid and c == mid)
+                        )
+                        if bad:
+                            st.warning(f"⚠️ {bad} cell(s) need manual input above.")
+
+                    all_edited.append({"name": edited_name, "grid": edited_grid,
+                                       "thumb": thumb})
+
+                st.markdown("")
+                confirm_col, discard_col = st.columns([3, 1])
                 with confirm_col:
                     if st.button(
-                        "✅ Add This Card", type="primary",
-                        use_container_width=True, key="confirm_scan",
+                        f"✅ Confirm All {len(all_edited)} Cards",
+                        type="primary", use_container_width=True, key="confirm_all_scans",
                     ):
-                        df = pd.DataFrame(edited_grid).astype(str)
-                        st.session_state.cards.append(df)
-                        st.session_state.card_names.append(
-                            st.session_state.ocr_name or f"Card {len(st.session_state.cards)}"
-                        )
-                        st.session_state.card_thumbs.append(st.session_state.ocr_thumb)
-                        st.session_state.ocr_grid  = None
-                        st.session_state.ocr_thumb = ""
-                        st.session_state.ocr_name  = ""
+                        for item in all_edited:
+                            df = pd.DataFrame(item["grid"]).astype(str)
+                            st.session_state.cards.append(df)
+                            st.session_state.card_names.append(item["name"])
+                            st.session_state.card_thumbs.append(item["thumb"])
+                        st.session_state.ocr_pending = []
                         recalc_winners()
-                        st.success("Card added!")
+                        st.success(f"✅ {len(all_edited)} card(s) added!")
                         st.rerun()
                 with discard_col:
-                    if st.button("🗑️ Discard Scan", use_container_width=True, key="discard_scan"):
-                        st.session_state.ocr_grid = None
+                    if st.button("🗑️ Discard All", use_container_width=True,
+                                 key="discard_all_scans"):
+                        st.session_state.ocr_pending = []
                         st.rerun()
 
     # ════════════════════════════════════════════════════════════════════════
@@ -913,7 +926,6 @@ with st.expander("➕ Add a New Card", expanded=False):
 
 # ─── Pattern card + Playing cards ────────────────────────────────────────────
 if not st.session_state.cards:
-    st.info("Use **➕ Add a New Card** above or reset to default cards from the sidebar.")
     st.stop()
 
 # Winner banners
