@@ -642,8 +642,61 @@ st.markdown(
 )
 
 # ── Globally marked values strip ──────────────────────────────────────────────
+_BALL_COLORS = {
+    "B": "linear-gradient(145deg,#1a6fc4,#0d47a1)",
+    "I": "linear-gradient(145deg,#e53935,#b71c1c)",
+    "N": "linear-gradient(145deg,#8e24aa,#4a148c)",
+    "G": "linear-gradient(145deg,#2e7d32,#1b5e20)",
+    "O": "linear-gradient(145deg,#ef6c00,#e65100)",
+    "":  "linear-gradient(145deg,#546e7a,#263238)",
+}
+
+def _bingo_letter(val: str) -> str:
+    try:
+        n = int(val)
+        if  1 <= n <= 15: return "B"
+        if 16 <= n <= 30: return "I"
+        if 31 <= n <= 45: return "N"
+        if 46 <= n <= 60: return "G"
+        if 61 <= n <= 75: return "O"
+    except ValueError:
+        pass
+    return ""
+
+def _ball_html(val: str) -> str:
+    letter   = _bingo_letter(val)
+    gradient = _BALL_COLORS.get(letter, _BALL_COLORS[""])
+    num_size = "13px" if len(val) >= 3 else "16px"
+    return (
+        f'<div style="display:flex;justify-content:center;padding:4px 0 2px;">'
+        f'<div style="'
+        f'  width:58px;height:58px;border-radius:50%;'
+        f'  background:{gradient};'
+        f'  border:3px solid rgba(255,255,255,0.22);'
+        f'  box-shadow:2px 5px 16px rgba(0,0,0,0.55),'
+        f'             inset 0 2px 6px rgba(255,255,255,0.18);'
+        f'  display:flex;flex-direction:column;'
+        f'  align-items:center;justify-content:center;'
+        f'  position:relative;overflow:hidden;'
+        f'">'
+        # gloss highlight
+        f'  <div style="'
+        f'    position:absolute;top:6px;left:12px;'
+        f'    width:22px;height:10px;border-radius:50%;'
+        f'    background:rgba(255,255,255,0.28);'
+        f'    transform:rotate(-30deg);">'
+        f'  </div>'
+        # letter label
+        f'  <span style="color:rgba(255,255,255,0.75);font-size:9px;'
+        f'    font-weight:800;letter-spacing:1.5px;line-height:1;">{letter}</span>'
+        # number
+        f'  <span style="color:#fff;font-size:{num_size};'
+        f'    font-weight:900;line-height:1.25;">{val}</span>'
+        f'</div></div>'
+    )
+
+
 def get_global_marked_values() -> list[str]:
-    """All distinct values manually marked on any card, sorted numerically."""
     seen = set()
     for idx, card in enumerate(st.session_state.cards):
         for (r, c) in st.session_state.manual_marks.get(idx, set()):
@@ -657,7 +710,6 @@ def get_global_marked_values() -> list[str]:
 
 
 def unmark_global_value(val: str):
-    """Remove a specific value from every card's manual marks."""
     val = val.strip().upper()
     for idx, card in enumerate(st.session_state.cards):
         marks = st.session_state.manual_marks.setdefault(idx, set())
@@ -670,36 +722,37 @@ def unmark_global_value(val: str):
 
 marked_vals = get_global_marked_values()
 
-# Header row: label + Clear All button
 hdr_col, clr_col = st.columns([5, 1])
 with hdr_col:
     st.markdown(
         f'<div style="font-size:14px;font-weight:600;color:#aaa;padding:6px 0 4px;">'
-        f'📋 Marked values ({len(marked_vals)})'
-        + ('&nbsp; &nbsp;<span style="font-size:12px;font-weight:400;color:#666;">'
-           '— click a value to unmark it from all cards</span>' if marked_vals else '')
+        f'🎱 Marked values ({len(marked_vals)})'
+        + ('&nbsp;<span style="font-size:12px;font-weight:400;color:#555;">'
+           '— click ✕ under a ball to unmark it from all cards</span>'
+           if marked_vals else '')
         + '</div>',
         unsafe_allow_html=True,
     )
 with clr_col:
-    if marked_vals:
-        if st.button("🗑️ Clear All", key="clear_all_marks", use_container_width=True):
-            st.session_state.manual_marks = {}
-            recalc_winners()
-            st.rerun()
+    if marked_vals and st.button("🗑️ Clear All", key="clear_all_marks",
+                                  use_container_width=True):
+        st.session_state.manual_marks = {}
+        recalc_winners()
+        st.rerun()
 
-# Chips — each is a clickable button: click = unmark that value everywhere
 if marked_vals:
-    MAX_PER_ROW = 10
+    MAX_PER_ROW = 12
     for row_start in range(0, len(marked_vals), MAX_PER_ROW):
         row_vals  = marked_vals[row_start : row_start + MAX_PER_ROW]
-        chip_cols = st.columns(len(row_vals))
-        for col, val in zip(chip_cols, row_vals):
+        ball_cols = st.columns(len(row_vals))
+        for col, val in zip(ball_cols, row_vals):
             with col:
+                # Bingo ball (visual)
+                st.markdown(_ball_html(val), unsafe_allow_html=True)
+                # Remove button beneath the ball
                 if st.button(
-                    f"{val} ✕",
+                    "✕",
                     key=f"chip_{val}_{st.session_state.round}",
-                    type="primary",
                     use_container_width=True,
                 ):
                     unmark_global_value(val)
