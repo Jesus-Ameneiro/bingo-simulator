@@ -166,21 +166,29 @@ def render_pattern_card():
     size    = st.session_state.pattern_size
     status  = f"Custom — {len(pattern)} cell(s) marked" if pattern else "Using sidebar rules"
 
+    # ── Title bar ────────────────────────────────────────────────────────────
     st.markdown(
         '<div style="background:linear-gradient(135deg,#0f3460,#16213e);'
-        'border-radius:10px 10px 0 0;padding:10px 14px;">'
-        '<span style="color:#ffd700;font-weight:700;font-size:15px;">🎯 Round Winning Pattern</span>'
-        f'<span style="float:right;background:#e94560;color:white;padding:2px 10px;'
-        f'border-radius:12px;font-size:12px;font-weight:bold;">{status}</span>'
+        'border-radius:10px 10px 0 0;padding:12px 18px;display:flex;'
+        'align-items:center;justify-content:space-between;">'
+        '<span style="color:#ffd700;font-weight:700;font-size:17px;">'
+        '🎯 Round Winning Pattern</span>'
+        f'<span style="background:#e94560;color:white;padding:3px 14px;'
+        f'border-radius:14px;font-size:13px;font-weight:bold;">{status}</span>'
         '</div>',
         unsafe_allow_html=True,
     )
 
     with st.container(border=True):
-        sz_col, clr_col = st.columns([3, 1])
+        # ── Controls row ─────────────────────────────────────────────────────
+        desc_col, sz_col, clr_col = st.columns([5, 2, 1], gap="small")
+        with desc_col:
+            st.caption(
+                "Click a cell to add it to the winning pattern (✅ = required, ⬜ = not required, ★ = free space always counts)."
+            )
         with sz_col:
             new_size = st.radio(
-                "size", [3, 4, 5], index=[3, 4, 5].index(size),
+                "Grid size", [3, 4, 5], index=[3, 4, 5].index(size),
                 horizontal=True, label_visibility="collapsed",
                 key="pat_size_radio",
             )
@@ -195,53 +203,48 @@ def render_pattern_card():
                 recalc_winners()
                 st.rerun()
 
-        # BINGO header
-        if size == 5:
-            hc = st.columns(5, gap="small")
-            for ci, letter in enumerate("BINGO"):
-                with hc[ci]:
-                    st.markdown(
-                        f'<div style="background:#1a1a2e;color:#ffd700;text-align:center;'
-                        f'font-weight:bold;font-size:13px;padding:5px 0;'
-                        f'border-radius:4px;margin-bottom:2px;">{letter}</div>',
-                        unsafe_allow_html=True,
-                    )
-
-        # Clickable cells
-        for r in range(size):
-            rc = st.columns(size, gap="small")
-            for c in range(size):
-                with rc[c]:
-                    is_free = (rules["free_space"] and size == 5
-                               and r == rules["free_space_row"]
-                               and c == rules["free_space_col"])
-                    if is_free:
+        # ── Centered grid ────────────────────────────────────────────────────
+        _, grid_col, _ = st.columns([2, 1, 2])
+        with grid_col:
+            # BINGO column headers
+            if size == 5:
+                hc = st.columns(5, gap="small")
+                for ci, letter in enumerate("BINGO"):
+                    with hc[ci]:
                         st.markdown(
-                            '<div style="background:#ffd700;color:#1a1a2e;text-align:center;'
-                            'font-weight:bold;font-size:16px;min-height:40px;line-height:40px;'
-                            'border-radius:6px;border:1px solid #ccc;">★</div>',
+                            f'<div style="background:#1a1a2e;color:#ffd700;text-align:center;'
+                            f'font-weight:bold;font-size:14px;padding:6px 0;'
+                            f'border-radius:4px;margin-bottom:3px;">{letter}</div>',
                             unsafe_allow_html=True,
                         )
-                    else:
-                        in_pat  = (r, c) in pattern
-                        if st.button(
-                            "✅" if in_pat else "⬜",
-                            key=f"pat_{r}_{c}_{st.session_state.round}",
-                            type="primary" if in_pat else "secondary",
-                            use_container_width=True,
-                        ):
-                            pat = st.session_state.round_pattern
-                            pat.discard((r, c)) if (r, c) in pat else pat.add((r, c))
-                            recalc_winners()
-                            st.rerun()
 
-        st.markdown(
-            '<div style="font-size:11px;color:#999;margin-top:6px;text-align:center;">'
-            + ("✅ required &nbsp;|&nbsp; ⬜ not required &nbsp;|&nbsp; ★ free space"
-               if pattern else "No pattern — sidebar rules active.")
-            + '</div>',
-            unsafe_allow_html=True,
-        )
+            # Clickable cells
+            for r in range(size):
+                rc = st.columns(size, gap="small")
+                for c in range(size):
+                    with rc[c]:
+                        is_free = (rules["free_space"] and size == 5
+                                   and r == rules["free_space_row"]
+                                   and c == rules["free_space_col"])
+                        if is_free:
+                            st.markdown(
+                                '<div style="background:#ffd700;color:#1a1a2e;text-align:center;'
+                                'font-weight:bold;font-size:18px;min-height:46px;line-height:46px;'
+                                'border-radius:6px;border:1px solid #ccc;">★</div>',
+                                unsafe_allow_html=True,
+                            )
+                        else:
+                            in_pat = (r, c) in pattern
+                            if st.button(
+                                "✅" if in_pat else "⬜",
+                                key=f"pat_{r}_{c}_{st.session_state.round}",
+                                type="primary" if in_pat else "secondary",
+                                use_container_width=True,
+                            ):
+                                pat = st.session_state.round_pattern
+                                pat.discard((r, c)) if (r, c) in pat else pat.add((r, c))
+                                recalc_winners()
+                                st.rerun()
 
 
 # ─── Playing Card ─────────────────────────────────────────────────────────────
@@ -506,7 +509,7 @@ with st.expander("➕ Add a New Card", expanded=False):
             st.rerun()
 
 
-# ─── Pattern + Cards ──────────────────────────────────────────────────────────
+# ─── Pattern card + Playing cards ────────────────────────────────────────────
 if not st.session_state.cards:
     st.info("Use **➕ Add a New Card** above or reset to default cards from the sidebar.")
     st.stop()
@@ -519,24 +522,26 @@ for wi in sorted(st.session_state.winners):
         unsafe_allow_html=True,
     )
 
+# ── Round Pattern card — full width ───────────────────────────────────────────
+render_pattern_card()
+
 st.markdown(
-    '<div style="font-size:13px;color:#6c757d;margin:6px 0 12px;">'
-    '💡 Click any cell on the cards below to mark or unmark it manually.'
+    '<div style="font-size:13px;color:#6c757d;margin:16px 0 8px;">'
+    '💡 Click any cell on the cards below to mark or unmark it.'
     '</div>',
     unsafe_allow_html=True,
 )
 
-# Pattern card + cards side by side
-n = len(st.session_state.cards)
-num_card_cols = min(n, 3)
+st.divider()
 
-pat_col, *card_cols_layout = st.columns(
-    [1] + [1] * num_card_cols, gap="large"
+# ── Playing cards — fixed 3 columns ──────────────────────────────────────────
+st.markdown(
+    f"### 🃏 Cards &nbsp;<span style='color:#6c757d;font-size:16px;'>"
+    f"({len(st.session_state.cards)})</span>",
+    unsafe_allow_html=True,
 )
 
-with pat_col:
-    render_pattern_card()
-
-for i in range(n):
-    with card_cols_layout[i % num_card_cols]:
+cols = st.columns(3, gap="large")
+for i in range(len(st.session_state.cards)):
+    with cols[i % 3]:
         render_card(i)
