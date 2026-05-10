@@ -40,21 +40,35 @@ st.markdown("""
         border-color:     #28a745 !important;
         color:            white   !important;
         font-weight:      bold    !important;
-        font-size:        15px    !important;
+        font-size:        14px    !important;
         min-height:       46px    !important;
         border-radius:    6px     !important;
+        padding:          4px 2px !important;
     }
     button[data-testid="baseButton-primary"]:hover {
         background-color: #218838 !important;
         border-color:     #1e7e34 !important;
     }
+    button[data-testid="baseButton-primary"] p {
+        white-space: nowrap   !important;
+        overflow:    hidden   !important;
+        font-size:   14px     !important;
+        margin:      0        !important;
+    }
 
     /* ── Gray = unmarked cell (secondary button) ── */
     button[data-testid="baseButton-secondary"] {
-        font-size:     15px !important;
-        min-height:    46px !important;
-        border-radius: 6px  !important;
-        color: #343a40      !important;
+        font-size:     14px  !important;
+        min-height:    46px  !important;
+        border-radius: 6px   !important;
+        color:         #343a40 !important;
+        padding:       4px 2px !important;
+    }
+    button[data-testid="baseButton-secondary"] p {
+        white-space: nowrap   !important;
+        overflow:    hidden   !important;
+        font-size:   14px     !important;
+        margin:      0        !important;
     }
 </style>
 """, unsafe_allow_html=True)
