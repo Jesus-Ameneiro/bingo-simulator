@@ -218,33 +218,61 @@ def recalc_winners():
 
 
 # ─── Round Pattern Card ───────────────────────────────────────────────────────
+def _pattern_presets(size: int) -> dict:
+    """Return common bingo winning patterns for the given grid size."""
+    mid = size // 2
+    p = {}
+    p["Row 1 (top)"]    = {(0, c) for c in range(size)}
+    if size > 2:
+        p[f"Row {mid + 1} (mid)"] = {(mid, c) for c in range(size)}
+    p[f"Row {size} (bot)"] = {(size - 1, c) for c in range(size)}
+    p["Col 1 (left)"]   = {(r, 0) for r in range(size)}
+    if size > 2:
+        p[f"Col {mid + 1} (mid)"] = {(r, mid) for r in range(size)}
+    p[f"Col {size} (right)"] = {(r, size - 1) for r in range(size)}
+    p["Diagonal ↘"]     = {(i, i) for i in range(size)}
+    p["Diagonal ↗"]     = {(i, size - 1 - i) for i in range(size)}
+    p["X Shape"]        = {(i, i) for i in range(size)} | {(i, size - 1 - i) for i in range(size)}
+    p["Blackout"]       = {(r, c) for r in range(size) for c in range(size)}
+    return p
+
+
 def render_pattern_card():
     rules   = st.session_state.rules
     pattern = st.session_state.round_pattern
     size    = st.session_state.pattern_size
-    status  = f"Custom — {len(pattern)} cell(s) marked" if pattern else "Using sidebar rules"
+    n_marked = len(pattern)
+    status   = f"Custom — {n_marked} cell(s) required" if pattern else "No pattern — click cells below"
 
     # ── Title bar ────────────────────────────────────────────────────────────
     st.markdown(
         '<div style="background:linear-gradient(135deg,#0f3460,#16213e);'
-        'border-radius:10px 10px 0 0;padding:12px 18px;display:flex;'
+        'border-radius:10px 10px 0 0;padding:14px 20px;display:flex;'
         'align-items:center;justify-content:space-between;">'
-        '<span style="color:#ffd700;font-weight:700;font-size:17px;">'
+        '<span style="color:#ffd700;font-weight:700;font-size:18px;letter-spacing:0.5px;">'
         '🎯 Round Winning Pattern</span>'
-        f'<span style="background:#e94560;color:white;padding:3px 14px;'
-        f'border-radius:14px;font-size:13px;font-weight:bold;">{status}</span>'
+        f'<span style="background:{"#28a745" if pattern else "#555"};color:white;'
+        f'padding:4px 16px;border-radius:14px;font-size:13px;font-weight:600;">'
+        f'{status}</span>'
         '</div>',
         unsafe_allow_html=True,
     )
 
     with st.container(border=True):
-        # ── Controls row ─────────────────────────────────────────────────────
-        desc_col, sz_col, clr_col = st.columns([5, 2, 1], gap="small")
-        with desc_col:
-            st.caption(
-                "Click a cell to add it to the winning pattern (✅ = required, ⬜ = not required, ★ = free space always counts)."
+
+        # ── 3-panel layout: Controls | Grid | Presets ─────────────────────────
+        ctrl_col, grid_col, preset_col = st.columns([1, 1.4, 1.6], gap="large")
+
+        # ── LEFT: controls ─────────────────────────────────────────────────────
+        with ctrl_col:
+            st.markdown(
+                '<p style="color:#aaa;font-size:13px;margin-bottom:16px;">'
+                'Click cells on the grid to define which positions a card must '
+                'complete in order to win this round.</p>',
+                unsafe_allow_html=True,
             )
-        with sz_col:
+
+            st.markdown("**Grid size**")
             new_size = st.radio(
                 "Grid size", [3, 4, 5], index=[3, 4, 5].index(size),
                 horizontal=True, label_visibility="collapsed",
@@ -255,28 +283,37 @@ def render_pattern_card():
                 st.session_state.round_pattern = set()
                 recalc_winners()
                 st.rerun()
-        with clr_col:
-            if st.button("🗑️ Clear", key="clr_pat", use_container_width=True):
+
+            st.markdown("")
+            if st.button("🗑️ Clear Pattern", key="clr_pat", use_container_width=True):
                 st.session_state.round_pattern = set()
                 recalc_winners()
                 st.rerun()
 
-        # ── Centered grid ────────────────────────────────────────────────────
-        _, grid_col, _ = st.columns([2, 1, 2])
+            st.markdown(
+                '<div style="margin-top:20px;padding:10px;background:#111;'
+                'border-radius:8px;font-size:12px;color:#888;line-height:1.7;">'
+                '✅ Required cell<br>'
+                '⬜ Not required<br>'
+                '★ Free space (always counts)'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+
+        # ── CENTER: interactive grid ────────────────────────────────────────────
         with grid_col:
             # BINGO column headers
-            if size == 5:
-                hc = st.columns(5, gap="small")
-                for ci, letter in enumerate("BINGO"):
-                    with hc[ci]:
-                        st.markdown(
-                            f'<div style="background:#1a1a2e;color:#ffd700;text-align:center;'
-                            f'font-weight:bold;font-size:14px;padding:6px 0;'
-                            f'border-radius:4px;margin-bottom:3px;">{letter}</div>',
-                            unsafe_allow_html=True,
-                        )
+            labels = list("BINGO") if size == 5 else [str(i + 1) for i in range(size)]
+            hc = st.columns(size, gap="small")
+            for ci, lbl in enumerate(labels):
+                with hc[ci]:
+                    st.markdown(
+                        f'<div style="background:#1a1a2e;color:#ffd700;text-align:center;'
+                        f'font-weight:bold;font-size:16px;padding:8px 0;'
+                        f'border-radius:6px;margin-bottom:4px;">{lbl}</div>',
+                        unsafe_allow_html=True,
+                    )
 
-            # Clickable cells
             for r in range(size):
                 rc = st.columns(size, gap="small")
                 for c in range(size):
@@ -286,9 +323,10 @@ def render_pattern_card():
                                    and c == rules["free_space_col"])
                         if is_free:
                             st.markdown(
-                                '<div style="background:#ffd700;color:#1a1a2e;text-align:center;'
-                                'font-weight:bold;font-size:18px;min-height:46px;line-height:46px;'
-                                'border-radius:6px;border:1px solid #ccc;">★</div>',
+                                '<div style="background:#ffd700;color:#1a1a2e;'
+                                'text-align:center;font-weight:bold;font-size:20px;'
+                                'min-height:50px;line-height:50px;border-radius:8px;'
+                                'border:2px solid #e6c200;margin:1px 0;">★</div>',
                                 unsafe_allow_html=True,
                             )
                         else:
@@ -303,6 +341,30 @@ def render_pattern_card():
                                 pat.discard((r, c)) if (r, c) in pat else pat.add((r, c))
                                 recalc_winners()
                                 st.rerun()
+
+        # ── RIGHT: quick presets ────────────────────────────────────────────────
+        with preset_col:
+            st.markdown("**⚡ Quick Patterns**")
+            st.caption("Click a preset to load it instantly.")
+
+            presets = _pattern_presets(size)
+            preset_names = list(presets.keys())
+
+            # Display in 2 columns
+            pc1, pc2 = st.columns(2, gap="small")
+            for i, name in enumerate(preset_names):
+                target_col = pc1 if i % 2 == 0 else pc2
+                with target_col:
+                    is_active = presets[name] == pattern
+                    if st.button(
+                        f"{'✓ ' if is_active else ''}{name}",
+                        key=f"preset_{name}_{st.session_state.round}",
+                        type="primary" if is_active else "secondary",
+                        use_container_width=True,
+                    ):
+                        st.session_state.round_pattern = set(presets[name])
+                        recalc_winners()
+                        st.rerun()
 
 
 # ─── Playing Card ─────────────────────────────────────────────────────────────
