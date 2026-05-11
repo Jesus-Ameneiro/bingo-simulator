@@ -103,112 +103,185 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ─── OCR Engine ───────────────────────────────────────────────────────────────
-def _ocr_cell(cell_img: np.ndarray) -> str:
-    """Run tesseract on a single cropped cell. Returns cleaned number string."""
-    # Upscale small cells for better OCR accuracy
-    h, w = cell_img.shape[:2]
-    if h < 60:
-        cell_img = cv2.resize(cell_img, (w * 3, h * 3), interpolation=cv2.INTER_CUBIC)
+def _ocr_cell(cell_bgr: np.ndarray) -> str:
+    """
+    OCR a single bingo card cell.
+    Uses multiple threshold levels and PSM modes; returns majority-vote result.
+    """
+    if cell_bgr is None or cell_bgr.size == 0:
+        return "?"
+    h2, w2 = cell_bgr.shape[:2]
+    if h2 < 10 or w2 < 10:
+        return "?"
 
-    # Grayscale + denoise
-    gray = cv2.cvtColor(cell_img, cv2.COLOR_BGR2GRAY) if len(cell_img.shape) == 3 else cell_img
-    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+    gray = cv2.cvtColor(cell_bgr, cv2.COLOR_BGR2GRAY)
+    results: list[int] = []
 
-    # Adaptive threshold — white text on dark or dark text on white both handled
-    thresh = cv2.adaptiveThreshold(
-        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 15, 8
-    )
+    for thr in (127, 100, 150):
+        _, binary = cv2.threshold(gray, thr, 255, cv2.THRESH_BINARY)
+        if np.mean(binary) < 127:
+            binary = cv2.bitwise_not(binary)
+        binary = cv2.copyMakeBorder(binary, 25, 25, 25, 25,
+                                    cv2.BORDER_CONSTANT, value=255)
+        for psm in (7, 6, 8):
+            cfg = f"--psm {psm} --oem 3 -c tessedit_char_whitelist=0123456789"
+            try:
+                raw    = pytesseract.image_to_string(binary, config=cfg).strip()
+                digits = "".join(ch for ch in raw if ch.isdigit())
+                if digits:
+                    n = int(digits)
+                    if 1 <= n <= 99:
+                        results.append(n)
+            except Exception:
+                pass
 
-    # Tesseract: digits only, single-line mode
-    cfg = "--psm 7 --oem 3 -c tessedit_char_whitelist=0123456789"
-    raw = pytesseract.image_to_string(thresh, config=cfg).strip()
-    raw = "".join(ch for ch in raw if ch.isdigit())
-    return raw if raw else "?"
+    if not results:
+        return "?"
+    from collections import Counter
+    return str(Counter(results).most_common(1)[0][0])
+
+
+def _find_white_bands(sat_1d: np.ndarray, y_start: int, y_end: int,
+                      threshold: float = 25.0, min_width: int = 12) -> list[tuple[int, int]]:
+    """Return list of (start, end) spans where saturation < threshold."""
+    bands: list[tuple[int, int]] = []
+    in_band = False
+    band_start = y_start
+    for y in range(y_start, y_end):
+        if sat_1d[y] < threshold and not in_band:
+            in_band    = True
+            band_start = y
+        elif sat_1d[y] >= threshold and in_band:
+            in_band = False
+            if y - band_start >= min_width:
+                bands.append((band_start, y))
+    if in_band and y_end - band_start >= min_width:
+        bands.append((band_start, y_end))
+    return bands
 
 
 def scan_card_from_image(pil_img: Image.Image, grid_size: int = 5) -> list[list[str]]:
     """
-    Extract bingo card grid from a PIL image using OpenCV + tesseract.
-    Strategy:
-      1. Find the largest white/light rectangular region (the card body).
-      2. Detect the BINGO header row and crop it out.
-      3. Divide remaining area evenly into grid_size × grid_size cells.
-      4. OCR each cell; auto-detect the centre free space.
-    Returns a list[list[str]] grid.
+    Robust bingo card reader — works on pink-bordered, decorative-stripe cards.
+
+    Key insight: each data row contains two white sub-bands separated by a thick
+    decorative pink horizontal stripe (~80 px).  The stripe cuts through the
+    middle of every digit.  The two sub-bands are connected by a LARGE gap
+    (~80 px) within a row, while adjacent rows are separated by only a tiny gap
+    (~7 px).  We pair sub-bands by their large internal gap to reconstruct each
+    full digit row before OCR.
+
+    Pipeline
+    --------
+    1. Work at original resolution (no resize) — larger cells → better OCR.
+    2. Detect card extent and BINGO header using row-saturation profile.
+    3. Find column left/right edges using col-saturation profile.
+    4. Find all white horizontal bands in the data area; pair them by large gap.
+    5. OCR each cell with multi-threshold, multi-PSM tesseract + majority vote.
     """
-    img = np.array(pil_img.convert("RGB"))
-    img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-    h, w = img_bgr.shape[:2]
+    # ── 0. Load at original resolution ────────────────────────────────────────
+    orig    = np.array(pil_img.convert("RGB"))
+    img_bgr = cv2.cvtColor(orig, cv2.COLOR_RGB2BGR)
+    h, w    = img_bgr.shape[:2]
 
-    # ── Step 1: isolate the card grid area ───────────────────────────────────
-    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
 
-    # Find the white grid body by looking for the largest white rectangle
-    # Threshold for light pixels (card background is white/near-white)
-    _, light_mask = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
-    contours, _ = cv2.findContours(light_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # ── 1. Row saturation profile (centre strip avoids side borders) ───────────
+    cx1, cx2 = int(w * 0.12), int(w * 0.88)
+    row_sat  = np.convolve(
+        hsv[:, cx1:cx2, 1].mean(axis=1), np.ones(3) / 3, mode="same"
+    )
 
-    # Pick the largest contour that is reasonably square
-    best_rect = None
-    best_area = 0
-    for cnt in contours:
-        x, y, cw, ch = cv2.boundingRect(cnt)
-        area = cw * ch
-        aspect = cw / ch if ch > 0 else 0
-        if area > best_area and 0.5 < aspect < 2.0 and area > (w * h * 0.1):
-            best_area = area
-            best_rect = (x, y, cw, ch)
-
-    if best_rect is None:
-        # Fallback: use full image with small margin
-        margin = int(min(h, w) * 0.05)
-        best_rect = (margin, margin, w - 2 * margin, h - 2 * margin)
-
-    gx, gy, gw, gh = best_rect
-    card_crop = img_bgr[gy: gy + gh, gx: gx + gw]
-    ch2, cw2 = card_crop.shape[:2]
-
-    # ── Step 2: remove BINGO header row (top ~15% is usually the header) ─────
-    # Find the first horizontal band that contains mostly white (grid starts)
-    gray_card = cv2.cvtColor(card_crop, cv2.COLOR_BGR2GRAY)
-    row_brightness = gray_card.mean(axis=1)  # mean brightness per row
-    # Header band ends where brightness drops (darker grid lines appear)
-    header_end = 0
-    threshold_brightness = row_brightness.max() * 0.7
-    for i, b in enumerate(row_brightness):
-        if i > ch2 * 0.05 and b < threshold_brightness:
-            header_end = i
+    # Card top (where pink header starts)
+    card_top = 0
+    for y in range(h):
+        if row_sat[y] > 60:
+            card_top = y
             break
-    if header_end < ch2 * 0.05:
-        header_end = int(ch2 * 0.18)  # safe default
 
-    grid_crop = card_crop[header_end:, :]
-    gh2, gw2 = grid_crop.shape[:2]
+    # Card bottom (last high-saturation row before bottom white margin)
+    card_bottom = h
+    for y in range(h - 1, card_top, -1):
+        if row_sat[y] > 60:
+            card_bottom = y
+            break
 
-    # ── Step 3: divide into grid_size × grid_size cells ──────────────────────
-    cell_h = gh2 // grid_size
-    cell_w = gw2 // grid_size
-    padding = max(4, int(min(cell_h, cell_w) * 0.08))  # slight inner padding
+    # Header end: first sustained low-saturation zone after the pink header
+    header_end = card_top
+    for y in range(card_top + 10, h - 20):
+        if row_sat[y] < 25 and row_sat[min(y + 10, h - 1)] < 40:
+            header_end = y
+            break
 
+    # ── 2. Column boundaries ──────────────────────────────────────────────────
+    col_sat = hsv[header_end:card_bottom, :, 1].mean(axis=0)
+
+    left_x = 0
+    for x in range(w):
+        if col_sat[x] > 50:
+            left_x = x
+            break
+    right_x = w
+    for x in range(w - 1, 0, -1):
+        if col_sat[x] > 50:
+            right_x = x
+            break
+
+    data_w = right_x - left_x
+    cols   = [int(left_x + i * data_w / grid_size) for i in range(grid_size + 1)]
+
+    # ── 3. Find and pair white row bands ──────────────────────────────────────
+    #   Each data row = two white sub-bands separated by a large gap (~80 px).
+    #   Between adjacent data rows: tiny gap (~7 px).
+    #   → Pair bands whose internal gap is large (> 50 px).
+    all_bands = _find_white_bands(row_sat, header_end, card_bottom)
+
+    pairs: list[tuple[int, int, int, int]] = []   # (top_s, top_e, bot_s, bot_e)
+    i = 0
+    while i < len(all_bands):
+        s1, e1 = all_bands[i]
+        if i + 1 < len(all_bands):
+            s2, e2 = all_bands[i + 1]
+            gap    = s2 - e1
+            if gap > 50:                           # large gap → same row's two halves
+                pairs.append((s1, e1, s2, e2))
+                i += 2
+                continue
+        # small gap or last band → skip singleton (inter-row separator)
+        i += 1
+
+    # Fallback: even division if band detection fails
+    if len(pairs) < grid_size:
+        band_h = (card_bottom - header_end) / grid_size
+        rows_fb = [int(header_end + j * band_h) for j in range(grid_size + 1)]
+        pairs = [(rows_fb[j], rows_fb[j], rows_fb[j], rows_fb[j + 1])
+                 for j in range(grid_size)]
+
+    # Row boundaries: from first sub-band start to second sub-band end (with 5 px margin)
+    rows: list[int] = []
+    for s1, e1, s2, e2 in pairs[:grid_size]:
+        rows.append(max(header_end, s1 - 5))
+    rows.append(min(card_bottom, pairs[grid_size - 1][3] + 5))
+
+    # ── 4. OCR every cell ─────────────────────────────────────────────────────
+    # Column overshoot: extend each cell 10 px beyond the border to avoid
+    # clipping the leftmost digit stroke (fixes e.g. "56" → "6" regression).
+    COL_OVERSHOOT = 10
+    mid  = grid_size // 2
     grid: list[list[str]] = []
-    mid = grid_size // 2
 
     for r in range(grid_size):
         row: list[str] = []
+        y1 = rows[r]
+        y2 = rows[r + 1]
         for c in range(grid_size):
-            y1 = r * cell_h + padding
-            y2 = (r + 1) * cell_h - padding
-            x1 = c * cell_w + padding
-            x2 = (c + 1) * cell_w - padding
-            cell = grid_crop[max(0, y1):max(0, y2), max(0, x1):max(0, x2)]
-
-            # Centre cell → FREE space
             if r == mid and c == mid:
                 row.append("FREE")
                 continue
-
-            val = _ocr_cell(cell) if cell.size > 0 else "?"
-            row.append(val)
+            x1 = max(0,  cols[c]     - COL_OVERSHOOT)
+            x2 = min(w,  cols[c + 1] + COL_OVERSHOOT)
+            cell = img_bgr[y1:y2, x1:x2]
+            row.append(_ocr_cell(cell) if cell.size > 0 else "?")
         grid.append(row)
 
     return grid
