@@ -409,7 +409,8 @@ _DEFAULTS = {
     "ocr_thumb":      "",
     "ocr_name":       "",
     "ocr_pending":    [],
-    "lang":           "es",   # default language: Spanish
+    "lang":           "es",
+    "load_key":       0,    # incremented after each successful .bingo import to reset uploader
     "rules": {
         "check_rows":      True,
         "check_cols":      True,
@@ -921,9 +922,10 @@ with st.sidebar:
     st.caption(t("load_caption"))
     bingo_file = st.file_uploader(
         "Load .bingo", type=["bingo", "json"],
-        key="bingo_load_up", label_visibility="collapsed",
+        key=f"bingo_load_up_{st.session_state.load_key}",
+        label_visibility="collapsed",
     )
-    if bingo_file:
+    if bingo_file is not None:
         try:
             raw_data = json.loads(bingo_file.read().decode("utf-8"))
             cards_in = raw_data.get("cards", [])
@@ -945,6 +947,8 @@ with st.sidebar:
             st.session_state.manual_marks  = {}
             st.session_state.winners       = set()
             st.session_state.round_pattern = set()
+            # Increment key → uploader resets to empty on next render (breaks the loop)
+            st.session_state.load_key     += 1
             recalc_winners()
             st.success(t("load_success", len(new_cards)))
             st.rerun()
