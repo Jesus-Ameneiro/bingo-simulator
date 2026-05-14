@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import base64
+import json
 import numpy as np
 from PIL import Image
 import io
@@ -526,6 +527,20 @@ _T = {
     "winner_banner":        {"es": "🏆 ¡BINGO! &nbsp;&nbsp; {} &nbsp;&nbsp; 🏆",
                              "en": "🏆 BINGO! &nbsp;&nbsp; {} &nbsp;&nbsp; 🏆"},
     "remove_card":          {"es": "🗑️ Eliminar tarjeta",        "en": "🗑️ Remove card"},
+    # ── Save / Load session ───────────────────────────────────────────────────
+    "save_load":            {"es": "### 💾 Guardar / Cargar",     "en": "### 💾 Save / Load"},
+    "save_btn":             {"es": "⬇️ Descargar sesión (.bingo)",
+                             "en": "⬇️ Download session (.bingo)"},
+    "save_caption":         {"es": "Guarda todas las tarjetas y cuadrículas en un archivo.",
+                             "en": "Saves all cards and grids to a file."},
+    "load_caption":         {"es": "Carga un archivo .bingo guardado previamente.",
+                             "en": "Load a previously saved .bingo file."},
+    "load_success":         {"es": "✅ {} tarjeta(s) cargadas desde el archivo.",
+                             "en": "✅ {} card(s) loaded from file."},
+    "load_error":           {"es": "⚠️ El archivo no es válido o está dañado.",
+                             "en": "⚠️ File is invalid or corrupted."},
+    "no_cards_to_save":     {"es": "No hay tarjetas para guardar.",
+                             "en": "No cards to save yet."},
 }
 for k, v in _DEFAULTS.items():
     if k not in st.session_state:
@@ -873,6 +888,68 @@ with st.sidebar:
     )
     if rules_img:
         st.image(rules_img, use_container_width=True)
+
+    # ── Save / Load ────────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown(t("save_load"))
+    st.caption(t("save_caption"))
+
+    # ── SAVE ──────────────────────────────────────────────────────────────────
+    if st.session_state.cards:
+        session_data = {
+            "version": 1,
+            "cards": [
+                {
+                    "name":  st.session_state.card_names[i],
+                    "grid":  st.session_state.cards[i].values.tolist(),
+                    "thumb": st.session_state.card_thumbs[i],
+                }
+                for i in range(len(st.session_state.cards))
+            ],
+        }
+        st.download_button(
+            label    = t("save_btn"),
+            data     = json.dumps(session_data, ensure_ascii=False, indent=2),
+            file_name= "bingo_session.bingo",
+            mime     = "application/json",
+            use_container_width=True,
+        )
+    else:
+        st.caption(t("no_cards_to_save"))
+
+    # ── LOAD ──────────────────────────────────────────────────────────────────
+    st.caption(t("load_caption"))
+    bingo_file = st.file_uploader(
+        "Load .bingo", type=["bingo", "json"],
+        key="bingo_load_up", label_visibility="collapsed",
+    )
+    if bingo_file:
+        try:
+            raw_data = json.loads(bingo_file.read().decode("utf-8"))
+            cards_in = raw_data.get("cards", [])
+            if not cards_in:
+                raise ValueError("empty")
+
+            new_cards  = []
+            new_names  = []
+            new_thumbs = []
+            for entry in cards_in:
+                df = pd.DataFrame(entry["grid"]).astype(str)
+                new_cards.append(df)
+                new_names.append(entry.get("name", f"Card {len(new_cards)}"))
+                new_thumbs.append(entry.get("thumb", ""))
+
+            st.session_state.cards         = new_cards
+            st.session_state.card_names    = new_names
+            st.session_state.card_thumbs   = new_thumbs
+            st.session_state.manual_marks  = {}
+            st.session_state.winners       = set()
+            st.session_state.round_pattern = set()
+            recalc_winners()
+            st.success(t("load_success", len(new_cards)))
+            st.rerun()
+        except Exception:
+            st.error(t("load_error"))
 
     st.markdown("---")
     st.markdown(t("round_mgmt"))
