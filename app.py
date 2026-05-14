@@ -106,7 +106,8 @@ st.markdown("""
 def _ocr_cell(cell_bgr: np.ndarray) -> str:
     """
     OCR a single bingo card cell.
-    Uses multiple threshold levels and PSM modes; returns majority-vote result.
+    Tries multiple thresholds and PSM modes; returns majority-vote result.
+    Enforces standard bingo range (1–75).
     """
     if cell_bgr is None or cell_bgr.size == 0:
         return "?"
@@ -115,8 +116,12 @@ def _ocr_cell(cell_bgr: np.ndarray) -> str:
         return "?"
 
     gray = cv2.cvtColor(cell_bgr, cv2.COLOR_BGR2GRAY)
-    results: list[int] = []
+    # Upscale very small cells
+    if h2 < 100:
+        scale = max(2, 100 // h2)
+        gray  = cv2.resize(gray, (w2 * scale, h2 * scale), cv2.INTER_CUBIC)
 
+    results: list[int] = []
     for thr in (127, 100, 150):
         _, binary = cv2.threshold(gray, thr, 255, cv2.THRESH_BINARY)
         if np.mean(binary) < 127:
@@ -130,7 +135,7 @@ def _ocr_cell(cell_bgr: np.ndarray) -> str:
                 digits = "".join(ch for ch in raw if ch.isdigit())
                 if digits:
                     n = int(digits)
-                    if 1 <= n <= 99:
+                    if 1 <= n <= 75:          # enforce bingo range
                         results.append(n)
             except Exception:
                 pass
@@ -162,60 +167,180 @@ def _find_white_bands(sat_1d: np.ndarray, y_start: int, y_end: int,
 
 def scan_card_from_image(pil_img: Image.Image, grid_size: int = 5) -> list[list[str]]:
     """
-    Robust bingo card reader — works on pink-bordered, decorative-stripe cards.
+    Robust bingo card reader that handles two card designs automatically:
 
-    Key insight: each data row contains two white sub-bands separated by a thick
-    decorative pink horizontal stripe (~80 px).  The stripe cuts through the
-    middle of every digit.  The two sub-bands are connected by a LARGE gap
-    (~80 px) within a row, while adjacent rows are separated by only a tiny gap
-    (~7 px).  We pair sub-bands by their large internal gap to reconstruct each
-    full digit row before OCR.
+    Style A — Clean green-border cards (one solid white band per row):
+      • Detects exactly grid_size large white bands with small inter-band gaps.
+      • Finds actual column dividers via vertical saturation scan.
+      • Uses tight inner padding to keep full digits in frame.
 
-    Pipeline
-    --------
-    1. Work at original resolution (no resize) — larger cells → better OCR.
-    2. Detect card extent and BINGO header using row-saturation profile.
-    3. Find column left/right edges using col-saturation profile.
-    4. Find all white horizontal bands in the data area; pair them by large gap.
-    5. OCR each cell with multi-threshold, multi-PSM tesseract + majority vote.
+    Style B — Pink-stripe cards (two white sub-bands per row):
+      • Each data row has a thick decorative pink stripe splitting digits in half.
+      • Pairs the two white sub-bands (connected by large gap > 50 px) into one row.
+      • Uses even column division from outer green-border edges with overshoot.
+
+    Pipeline (both styles):
+      1. Work at original resolution — larger cells → better OCR.
+      2. Detect card extent and BINGO header via row-saturation profile.
+      3. Classify card style from white-band gaps.
+      4. Build row & column boundaries accordingly.
+      5. OCR each cell: multi-threshold × multi-PSM, majority vote, range 1–75.
     """
     # ── 0. Load at original resolution ────────────────────────────────────────
     orig    = np.array(pil_img.convert("RGB"))
     img_bgr = cv2.cvtColor(orig, cv2.COLOR_RGB2BGR)
     h, w    = img_bgr.shape[:2]
+    hsv     = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
 
-    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
-
-    # ── 1. Row saturation profile (centre strip avoids side borders) ───────────
+    # ── 1. Row saturation profile ──────────────────────────────────────────────
     cx1, cx2 = int(w * 0.12), int(w * 0.88)
     row_sat  = np.convolve(
         hsv[:, cx1:cx2, 1].mean(axis=1), np.ones(3) / 3, mode="same"
     )
 
-    # Card top (where pink header starts)
+    # Card top / bottom from high-saturation (green/pink) border rows
     card_top = 0
     for y in range(h):
         if row_sat[y] > 60:
             card_top = y
             break
-
-    # Card bottom (last high-saturation row before bottom white margin)
     card_bottom = h
     for y in range(h - 1, card_top, -1):
         if row_sat[y] > 60:
             card_bottom = y
             break
 
-    # Header end: first sustained low-saturation zone after the pink header
+    # Header end: first sustained low-saturation zone after the coloured header
     header_end = card_top
     for y in range(card_top + 10, h - 20):
         if row_sat[y] < 25 and row_sat[min(y + 10, h - 1)] < 40:
             header_end = y
             break
 
-    # ── 2. Column boundaries ──────────────────────────────────────────────────
-    col_sat = hsv[header_end:card_bottom, :, 1].mean(axis=0)
+    # ── 2. Find white horizontal bands ────────────────────────────────────────
+    all_bands = _find_white_bands(row_sat, header_end, card_bottom)
+    gaps = ([all_bands[i + 1][0] - all_bands[i][1]
+             for i in range(len(all_bands) - 1)]
+            if len(all_bands) > 1 else [])
+    n_large_gaps = sum(1 for g in gaps if g > 50)
 
+    # ── 3. Route to appropriate strategy ──────────────────────────────────────
+
+    # ── Style A: clean cards — one large white band per row ───────────────────
+    if len(all_bands) == grid_size and all(g < 30 for g in gaps):
+        # Use white band extents directly as row boundaries
+        rows: list[int] = [max(header_end, b[0] - 5) for b in all_bands]
+        rows.append(min(card_bottom, all_bands[-1][1] + 5))
+
+        # Detect column dividers via vertical saturation in the data zone
+        y1c = all_bands[1][0]
+        y2c = all_bands[-2][1]
+        col_sat = np.convolve(
+            hsv[y1c:y2c, :, 1].mean(axis=0), np.ones(5) / 5, mode="same"
+        )
+        dividers: list[int] = []
+        in_div = False
+        d_start = 0
+        for x in range(w):
+            if col_sat[x] >= 60 and not in_div:
+                in_div = True
+                d_start = x
+            elif col_sat[x] < 60 and in_div:
+                in_div = False
+                if x - d_start >= 3:
+                    dividers.append(int((d_start + x) / 2))
+        if in_div and w - d_start >= 3:
+            dividers.append(int((d_start + w) / 2))
+
+        if len(dividers) >= grid_size + 1:
+            cols_x = dividers[:grid_size + 1]
+        else:
+            lx = dividers[0] if dividers else int(w * 0.05)
+            rx = dividers[-1] if len(dividers) > 1 else int(w * 0.95)
+            cols_x = [int(lx + i * (rx - lx) / grid_size)
+                      for i in range(grid_size + 1)]
+
+        # Tight inner pad (2 px) avoids clipping leading digits
+        mid  = grid_size // 2
+        PAD  = 2
+        grid: list[list[str]] = []
+        for r in range(grid_size):
+            row: list[str] = []
+            y1 = rows[r]  + PAD
+            y2 = rows[r + 1] - PAD
+            for c in range(grid_size):
+                if r == mid and c == mid:
+                    row.append("FREE")
+                    continue
+                x1 = max(0, cols_x[c]     + PAD)
+                x2 = min(w, cols_x[c + 1] - PAD)
+                cell = img_bgr[y1:y2, x1:x2]
+                row.append(_ocr_cell(cell) if cell.size > 0 else "?")
+            grid.append(row)
+        return grid
+
+    # ── Style B: pink-stripe cards — two sub-bands per row ────────────────────
+    if n_large_gaps >= grid_size - 1:
+        pairs: list[tuple[int, int, int, int]] = []
+        i = 0
+        while i < len(all_bands):
+            s1, e1 = all_bands[i]
+            if i + 1 < len(all_bands):
+                s2, e2 = all_bands[i + 1]
+                if s2 - e1 > 50:
+                    pairs.append((s1, e1, s2, e2))
+                    i += 2
+                    continue
+            i += 1
+
+        rows = []
+        if len(pairs) >= grid_size:
+            for s1, e1, s2, e2 in pairs[:grid_size]:
+                rows.append(max(header_end, s1 - 5))
+            rows.append(min(card_bottom, pairs[grid_size - 1][3] + 5))
+        else:
+            bh = (card_bottom - header_end) / grid_size
+            rows = [int(header_end + j * bh) for j in range(grid_size + 1)]
+
+        # Even column division from outer green-border edges
+        col_sat = hsv[header_end:card_bottom, :, 1].mean(axis=0)
+        left_x = 0
+        for x in range(w):
+            if col_sat[x] > 50:
+                left_x = x
+                break
+        right_x = w
+        for x in range(w - 1, 0, -1):
+            if col_sat[x] > 50:
+                right_x = x
+                break
+        cols_x = [int(left_x + i * (right_x - left_x) / grid_size)
+                  for i in range(grid_size + 1)]
+
+        mid = grid_size // 2
+        COL_OVERSHOOT = 10
+        grid = []
+        for r in range(grid_size):
+            row = []
+            y1 = rows[r]     + 6
+            y2 = rows[r + 1] - 6
+            for c in range(grid_size):
+                if r == mid and c == mid:
+                    row.append("FREE")
+                    continue
+                x1 = max(0, cols_x[c]     - COL_OVERSHOOT)
+                x2 = min(w, cols_x[c + 1] + COL_OVERSHOOT)
+                cell = img_bgr[y1:y2, x1:x2]
+                row.append(_ocr_cell(cell) if cell.size > 0 else "?")
+            grid.append(row)
+        return grid
+
+    # ── Fallback: even division using last white band as bottom ────────────────
+    data_end = all_bands[-1][1] if all_bands else card_bottom
+    bh       = (data_end - header_end) / grid_size
+    rows     = [int(header_end + j * bh) for j in range(grid_size + 1)]
+
+    col_sat = hsv[header_end:card_bottom, :, 1].mean(axis=0)
     left_x = 0
     for x in range(w):
         if col_sat[x] > 50:
@@ -226,64 +351,24 @@ def scan_card_from_image(pil_img: Image.Image, grid_size: int = 5) -> list[list[
         if col_sat[x] > 50:
             right_x = x
             break
+    cols_x = [int(left_x + i * (right_x - left_x) / grid_size)
+              for i in range(grid_size + 1)]
 
-    data_w = right_x - left_x
-    cols   = [int(left_x + i * data_w / grid_size) for i in range(grid_size + 1)]
-
-    # ── 3. Find and pair white row bands ──────────────────────────────────────
-    #   Each data row = two white sub-bands separated by a large gap (~80 px).
-    #   Between adjacent data rows: tiny gap (~7 px).
-    #   → Pair bands whose internal gap is large (> 50 px).
-    all_bands = _find_white_bands(row_sat, header_end, card_bottom)
-
-    pairs: list[tuple[int, int, int, int]] = []   # (top_s, top_e, bot_s, bot_e)
-    i = 0
-    while i < len(all_bands):
-        s1, e1 = all_bands[i]
-        if i + 1 < len(all_bands):
-            s2, e2 = all_bands[i + 1]
-            gap    = s2 - e1
-            if gap > 50:                           # large gap → same row's two halves
-                pairs.append((s1, e1, s2, e2))
-                i += 2
-                continue
-        # small gap or last band → skip singleton (inter-row separator)
-        i += 1
-
-    # Fallback: even division if band detection fails
-    if len(pairs) < grid_size:
-        band_h = (card_bottom - header_end) / grid_size
-        rows_fb = [int(header_end + j * band_h) for j in range(grid_size + 1)]
-        pairs = [(rows_fb[j], rows_fb[j], rows_fb[j], rows_fb[j + 1])
-                 for j in range(grid_size)]
-
-    # Row boundaries: from first sub-band start to second sub-band end (with 5 px margin)
-    rows: list[int] = []
-    for s1, e1, s2, e2 in pairs[:grid_size]:
-        rows.append(max(header_end, s1 - 5))
-    rows.append(min(card_bottom, pairs[grid_size - 1][3] + 5))
-
-    # ── 4. OCR every cell ─────────────────────────────────────────────────────
-    # Column overshoot: extend each cell 10 px beyond the border to avoid
-    # clipping the leftmost digit stroke (fixes e.g. "56" → "6" regression).
-    COL_OVERSHOOT = 10
     mid  = grid_size // 2
-    grid: list[list[str]] = []
-
+    grid = []
     for r in range(grid_size):
-        row: list[str] = []
-        y1 = rows[r]
-        y2 = rows[r + 1]
+        row = []
+        y1 = rows[r]     + 6
+        y2 = rows[r + 1] - 6
         for c in range(grid_size):
             if r == mid and c == mid:
                 row.append("FREE")
                 continue
-            x1 = max(0,  cols[c]     - COL_OVERSHOOT)
-            x2 = min(w,  cols[c + 1] + COL_OVERSHOOT)
+            x1 = max(0, cols_x[c]     - 10)
+            x2 = min(w, cols_x[c + 1] + 10)
             cell = img_bgr[y1:y2, x1:x2]
             row.append(_ocr_cell(cell) if cell.size > 0 else "?")
         grid.append(row)
-
     return grid
 
 
