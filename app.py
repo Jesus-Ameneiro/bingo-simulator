@@ -20,6 +20,26 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# ─── Thumbnail helper ─────────────────────────────────────────────────────────
+def _make_thumb(pil_or_bytes, max_width: int = 200) -> str:
+    """
+    Compress any image down to ≤ max_width px wide, encode as JPEG base64.
+    Keeps session-state size tiny (~5–8 KB per card instead of 300–500 KB).
+    """
+    import io as _io
+    if isinstance(pil_or_bytes, (bytes, bytearray)):
+        img = Image.open(_io.BytesIO(pil_or_bytes)).convert("RGB")
+    else:
+        img = pil_or_bytes.convert("RGB")
+    # Resize proportionally
+    w, h = img.size
+    if w > max_width:
+        img = img.resize((max_width, int(h * max_width / w)), Image.LANCZOS)
+    buf = _io.BytesIO()
+    img.save(buf, format="JPEG", quality=72, optimize=True)
+    b64 = base64.standard_b64encode(buf.getvalue()).decode()
+    return f"data:image/jpeg;base64,{b64}"
+
 # ─── CSS ──────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
@@ -944,15 +964,8 @@ with st.expander(
                             f.seek(0)
                             pil_img = Image.open(f)
                             grid    = scan_card_from_image(pil_img, scan_size)
-
-                            f.seek(0)
-                            raw = f.read()
-                            mt  = ("image/png" if f.name.lower().endswith(".png")
-                                   else "image/webp" if f.name.lower().endswith(".webp")
-                                   else "image/jpeg")
-                            thumb = "data:{};base64,{}".format(
-                                mt, base64.standard_b64encode(raw).decode()
-                            )
+                            # Store a small compressed thumbnail — not the full image
+                            thumb   = _make_thumb(pil_img)
                             pending.append({
                                 "name":  f.name.rsplit(".", 1)[0],
                                 "grid":  grid,
@@ -1173,13 +1186,7 @@ with st.expander(
                 thumb = ""
                 if card_img:
                     card_img.seek(0)
-                    raw = card_img.read()
-                    mt  = ("image/png" if card_img.name.lower().endswith(".png")
-                           else "image/webp" if card_img.name.lower().endswith(".webp")
-                           else "image/jpeg")
-                    thumb = "data:{};base64,{}".format(
-                        mt, base64.standard_b64encode(raw).decode()
-                    )
+                    thumb = _make_thumb(Image.open(card_img))
 
                 st.session_state.cards.append(df)
                 st.session_state.card_names.append(
