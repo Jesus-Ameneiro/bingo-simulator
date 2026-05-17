@@ -66,22 +66,24 @@ st.markdown("""
         margin: 6px 0; box-shadow: 0 4px 20px rgba(255,215,0,0.55);
     }
 
-    /* ── GREEN = marked + matches pattern (primary button) ── */
-    button[data-testid="baseButton-primary"] {
-        background-color: #28a745 !important;
-        border-color:     #28a745 !important;
-        color:            white   !important;
-        font-weight:      bold    !important;
+    /* ── Base: all cell buttons start GRAY (secondary, no marker) ── */
+    button[data-testid="baseButton-secondary"] {
+        background-color: #3a3a3a !important;
+        border-color:     #555555 !important;
+        color:            #cccccc !important;
         font-size:        14px    !important;
+        font-weight:      600     !important;
         min-height:       46px    !important;
         border-radius:    6px     !important;
         padding:          4px 0px !important;
         width:            100%    !important;
     }
-    button[data-testid="baseButton-primary"]:hover {
-        background-color: #218838 !important;
-        border-color:     #1e7e34 !important;
+    button[data-testid="baseButton-secondary"]:hover {
+        background-color: #505050 !important;
+        border-color:     #707070 !important;
+        color:            #ffffff !important;
     }
+    button[data-testid="baseButton-secondary"] p,
     button[data-testid="baseButton-primary"] p {
         white-space: nowrap  !important;
         overflow:    visible !important;
@@ -90,42 +92,35 @@ st.markdown("""
         line-height: 1.2     !important;
     }
 
-    /* ── GRAY = unmarked cell (secondary button) ── */
-    button[data-testid="baseButton-secondary"] {
-        background-color: #3a3a3a !important;
-        border-color:     #555555 !important;
-        color:            #cccccc !important;
-        font-size:        14px    !important;
-        min-height:       46px    !important;
-        border-radius:    6px     !important;
-        padding:          4px 0px !important;
-        width:            100%    !important;
+    /* ── GREEN: .cell-matched marker precedes the button's element-container ── */
+    .element-container:has(.cell-matched) + .element-container button[data-testid="baseButton-secondary"] {
+        background-color: #27ae60 !important;
+        border-color:     #1e8449 !important;
+        color:            white   !important;
+        font-weight:      bold    !important;
     }
-    button[data-testid="baseButton-secondary"]:hover {
-        background-color: #4a4a4a !important;
-        border-color:     #666666 !important;
-        color:            #ffffff !important;
-    }
-    button[data-testid="baseButton-secondary"] p {
-        white-space: nowrap  !important;
-        overflow:    visible !important;
-        font-size:   14px    !important;
-        margin:      0       !important;
-        line-height: 1.2     !important;
+    .element-container:has(.cell-matched) + .element-container button[data-testid="baseButton-secondary"]:hover {
+        background-color: #1e8449 !important;
     }
 
-    /* ── RED = marked but does NOT match the current pattern ──
-       Injected via a hidden <span class="cell-unmatched"> sibling.
-       :has() is supported in all modern browsers (Chrome 105+, Firefox 121+, Safari 15.4+). ── */
-    div:has(> span.cell-unmatched) button[data-testid="baseButton-secondary"] {
+    /* ── RED: .cell-unmatched marker precedes the button's element-container ── */
+    .element-container:has(.cell-unmatched) + .element-container button[data-testid="baseButton-secondary"] {
         background-color: #c0392b !important;
         border-color:     #a93226 !important;
         color:            white   !important;
         font-weight:      bold    !important;
     }
-    div:has(> span.cell-unmatched) button[data-testid="baseButton-secondary"]:hover {
-        background-color: #e74c3c !important;
-        border-color:     #c0392b !important;
+    .element-container:has(.cell-unmatched) + .element-container button[data-testid="baseButton-secondary"]:hover {
+        background-color: #a93226 !important;
+    }
+
+    /* ── Keep primary style only for non-cell buttons (pattern grid, scan, confirm) ── */
+    button[data-testid="baseButton-primary"] {
+        font-size:     14px !important;
+        min-height:    46px !important;
+        border-radius: 6px  !important;
+        padding:       4px 0px !important;
+        width:         100% !important;
     }
 
     /* ── Squeeze column gaps inside card containers ── */
@@ -891,30 +886,34 @@ def render_card(idx: int):
                         pattern  = st.session_state.round_pattern
                         in_pat   = (r, c) in pattern if pattern else False
 
-                        # Three visual states:
-                        #   GREEN  (primary)   — marked + matches pattern
-                        #                        (or just marked when no pattern is set)
-                        #   RED    (secondary + marker span) — marked but NOT in pattern
-                        #   GRAY   (secondary)  — unmarked
+                        # Determine state
                         if pattern:
                             matched   = marked and in_pat
                             unmatched = marked and not in_pat
                         else:
-                            matched   = marked
+                            matched   = marked      # no pattern → all marked = green
                             unmatched = False
 
-                        if unmatched:
-                            # Inject hidden marker so CSS :has() can color this button red
+                        # Inject a hidden marker div so CSS can color the button
+                        # via: .element-container:has(.marker) + .element-container button
+                        if matched:
                             st.markdown(
-                                '<span class="cell-unmatched" '
-                                'style="display:none;height:0;"></span>',
+                                '<div class="cell-matched" style="display:none;'
+                                'height:0;margin:0;padding:0;"></div>',
                                 unsafe_allow_html=True,
                             )
+                        elif unmatched:
+                            st.markdown(
+                                '<div class="cell-unmatched" style="display:none;'
+                                'height:0;margin:0;padding:0;"></div>',
+                                unsafe_allow_html=True,
+                            )
+                        # No marker = gray (default secondary style)
 
                         if st.button(
                             val,
                             key=f"cell_{idx}_{r}_{c}_{st.session_state.round}",
-                            type="primary" if matched else "secondary",
+                            type="secondary",
                             use_container_width=True,
                         ):
                             toggle_mark_global(idx, r, c)
