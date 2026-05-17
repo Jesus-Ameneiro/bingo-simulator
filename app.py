@@ -66,10 +66,10 @@ st.markdown("""
         margin: 6px 0; box-shadow: 0 4px 20px rgba(255,215,0,0.55);
     }
 
-    /* ── Green = marked cell (primary button) ── */
+    /* ── Red = marked cell that matches the pattern (primary button) ── */
     button[data-testid="baseButton-primary"] {
-        background-color: #28a745 !important;
-        border-color:     #28a745 !important;
+        background-color: #c0392b !important;
+        border-color:     #c0392b !important;
         color:            white   !important;
         font-weight:      bold    !important;
         font-size:        14px    !important;
@@ -79,8 +79,8 @@ st.markdown("""
         width:            100%    !important;
     }
     button[data-testid="baseButton-primary"]:hover {
-        background-color: #218838 !important;
-        border-color:     #1e7e34 !important;
+        background-color: #a93226 !important;
+        border-color:     #a93226 !important;
     }
     button[data-testid="baseButton-primary"] p {
         white-space: nowrap   !important;
@@ -90,14 +90,20 @@ st.markdown("""
         line-height: 1.2      !important;
     }
 
-    /* ── Gray = unmarked cell (secondary button) ── */
+    /* ── Gray = unmarked or marked-but-not-in-pattern cell (secondary button) ── */
     button[data-testid="baseButton-secondary"] {
-        font-size:     14px    !important;
-        min-height:    46px    !important;
-        border-radius: 6px     !important;
-        color:         #343a40 !important;
-        padding:       4px 0px !important;
-        width:         100%    !important;
+        background-color: #4a4a4a !important;
+        border-color:     #5a5a5a !important;
+        color:            #d0d0d0 !important;
+        font-size:        14px    !important;
+        min-height:       46px    !important;
+        border-radius:    6px     !important;
+        padding:          4px 0px !important;
+        width:            100%    !important;
+    }
+    button[data-testid="baseButton-secondary"]:hover {
+        background-color: #5a5a5a !important;
+        border-color:     #6a6a6a !important;
     }
     button[data-testid="baseButton-secondary"] p {
         white-space: nowrap   !important;
@@ -866,11 +872,17 @@ def render_card(idx: int):
                             unsafe_allow_html=True,
                         )
                     else:
-                        marked = is_marked(idx, r, c)
+                        marked  = is_marked(idx, r, c)
+                        pattern = st.session_state.round_pattern
+                        # Red (primary) when: no pattern and marked,
+                        #   OR pattern is set and this cell is marked + in the pattern
+                        highlight = marked and (
+                            not pattern or (r, c) in pattern
+                        )
                         if st.button(
                             val,
                             key=f"cell_{idx}_{r}_{c}_{st.session_state.round}",
-                            type="primary" if marked else "secondary",
+                            type="primary" if highlight else "secondary",
                             use_container_width=True,
                         ):
                             toggle_mark_global(idx, r, c)
