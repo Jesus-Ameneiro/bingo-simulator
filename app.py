@@ -402,6 +402,8 @@ if "cards" not in st.session_state:
 _DEFAULTS = {
     "manual_marks":   {},
     "winners":        set(),
+    "new_winners":    set(),
+    "winner_reasons": {},
     "round":          1,
     "round_pattern":  set(),
     "pattern_size":   5,
@@ -594,38 +596,59 @@ def toggle_mark_global(source_idx: int, r: int, c: int):
                     other_marks.add((rr, cc)) if marking else other_marks.discard((rr, cc))
 
 
-def check_bingo(idx: int) -> bool:
+def check_bingo(idx: int) -> str | None:
+    """
+    Check whether card `idx` has a bingo.
+    Returns a localised reason string if won, or None if not.
+    """
     card  = st.session_state.cards[idx]
     rules = st.session_state.rules
     nrows, ncols = card.shape
+    lang  = st.session_state.get("lang", "es")
     m = lambda r, c: is_marked(idx, r, c)
 
     pattern = st.session_state.round_pattern
     if pattern:
-        return all(m(r, c) for r, c in pattern)
+        if all(m(r, c) for r, c in pattern):
+            return {"es": "Patrón personalizado", "en": "Custom pattern"}[lang]
+        return None
 
     if rules.get("check_rows"):
-        if any(all(m(r, c) for c in range(ncols)) for r in range(nrows)):
-            return True
+        for r in range(nrows):
+            if all(m(r, c) for c in range(ncols)):
+                row_label = {"es": f"Fila {r + 1}", "en": f"Row {r + 1}"}[lang]
+                return row_label
     if rules.get("check_cols"):
-        if any(all(m(r, c) for r in range(nrows)) for c in range(ncols)):
-            return True
+        col_letters = list("BINGO") if ncols == 5 else [str(i + 1) for i in range(ncols)]
+        for c in range(ncols):
+            if all(m(r, c) for r in range(nrows)):
+                col_label = {"es": f"Columna {col_letters[c]}",
+                             "en": f"Column {col_letters[c]}"}[lang]
+                return col_label
     if rules.get("check_diagonals") and nrows == ncols:
         if all(m(i, i) for i in range(nrows)):
-            return True
+            return {"es": "Diagonal ↘", "en": "Diagonal ↘"}[lang]
         if all(m(i, nrows - 1 - i) for i in range(nrows)):
-            return True
+            return {"es": "Diagonal ↗", "en": "Diagonal ↗"}[lang]
     if rules.get("check_full_card"):
         if all(m(r, c) for r in range(nrows) for c in range(ncols)):
-            return True
-    return False
+            return {"es": "¡Cartón completo!", "en": "Full card!"}[lang]
+    return None
 
 
 def recalc_winners():
-    st.session_state.winners = {
-        i for i in range(len(st.session_state.cards))
-        if check_bingo(i)
-    }
+    """Rebuild winners set and detect newly-winning cards this rerun."""
+    prev = st.session_state.get("winners", set())
+    reasons: dict[int, str] = {}
+    for i in range(len(st.session_state.cards)):
+        reason = check_bingo(i)
+        if reason is not None:
+            reasons[i] = reason
+    new_set = set(reasons.keys())
+    # Store new winners (cards that just won, weren't winners before)
+    st.session_state.new_winners   = new_set - prev
+    st.session_state.winners       = new_set
+    st.session_state.winner_reasons = reasons
 
 
 # ─── Round Pattern Card ───────────────────────────────────────────────────────
@@ -787,8 +810,13 @@ def render_card(idx: int):
     nrows, ncols = card.shape
 
     if is_winner:
+        reason = st.session_state.get("winner_reasons", {}).get(idx, "")
+        reason_txt = f" · {reason}" if reason else ""
+        lang = st.session_state.get("lang", "es")
         st.markdown(
-            f'<div class="winner-banner">{t("winner_banner", name)}</div>',
+            f'<div class="winner-banner">'
+            f'🏆 {"¡BINGO!" if lang=="es" else "BINGO!"}'
+            f'&nbsp; {name}{reason_txt} 🏆</div>',
             unsafe_allow_html=True,
         )
 
@@ -946,6 +974,8 @@ with st.sidebar:
             st.session_state.card_thumbs   = new_thumbs
             st.session_state.manual_marks  = {}
             st.session_state.winners       = set()
+            st.session_state.new_winners   = set()
+            st.session_state.winner_reasons = {}
             st.session_state.round_pattern = set()
             # Increment key → uploader resets to empty on next render (breaks the loop)
             st.session_state.load_key     += 1
@@ -959,20 +989,24 @@ with st.sidebar:
     st.markdown(t("round_mgmt"))
 
     if st.button(t("keep_cards"), use_container_width=True):
-        st.session_state.manual_marks  = {}
-        st.session_state.winners       = set()
-        st.session_state.round_pattern = set()
-        st.session_state.round        += 1
+        st.session_state.manual_marks   = {}
+        st.session_state.winners        = set()
+        st.session_state.new_winners    = set()
+        st.session_state.winner_reasons = {}
+        st.session_state.round_pattern  = set()
+        st.session_state.round         += 1
         st.rerun()
 
     if st.button(t("clear_cards"), use_container_width=True):
-        st.session_state.cards         = []
-        st.session_state.card_names    = []
-        st.session_state.card_thumbs   = []
-        st.session_state.manual_marks  = {}
-        st.session_state.winners       = set()
-        st.session_state.round_pattern = set()
-        st.session_state.round        += 1
+        st.session_state.cards          = []
+        st.session_state.card_names     = []
+        st.session_state.card_thumbs    = []
+        st.session_state.manual_marks   = {}
+        st.session_state.winners        = set()
+        st.session_state.new_winners    = set()
+        st.session_state.winner_reasons = {}
+        st.session_state.round_pattern  = set()
+        st.session_state.round         += 1
         st.rerun()
 
 
@@ -1291,13 +1325,39 @@ with st.expander(
 if not st.session_state.cards:
     st.stop()
 
-# Winner banners
-for wi in sorted(st.session_state.winners):
-    st.markdown(
-        f'<div class="winner-banner">'
-        f'{t("winner_banner", st.session_state.card_names[wi])}</div>',
-        unsafe_allow_html=True,
-    )
+# ── New winner celebration (fires only the rerun a card first wins) ───────────
+if st.session_state.get("new_winners"):
+    st.balloons()
+    # Clear new_winners so balloons don't repeat on the next rerun
+    st.session_state.new_winners = set()
+
+# ── Persistent winner alert bar (stays as long as there are winners) ──────────
+winners     = st.session_state.get("winners", set())
+reasons     = st.session_state.get("winner_reasons", {})
+card_names  = st.session_state.card_names
+
+if winners:
+    lang = st.session_state.get("lang", "es")
+    for wi in sorted(winners):
+        name   = card_names[wi]
+        reason = reasons.get(wi, "")
+        reason_label = (
+            f'<span style="font-size:15px;opacity:0.85;margin-left:10px;">({reason})</span>'
+            if reason else ""
+        )
+        st.markdown(
+            f'<div style="'
+            f'background:linear-gradient(135deg,#ffd700 0%,#ff8c00 100%);'
+            f'color:#1a1a2e;padding:18px 28px;border-radius:14px;'
+            f'text-align:center;font-size:22px;font-weight:900;'
+            f'margin:6px 0;box-shadow:0 6px 28px rgba(255,180,0,0.55);'
+            f'letter-spacing:0.5px;animation:none;">'
+            f'🏆&nbsp;&nbsp;{"¡BINGO!" if lang=="es" else "BINGO!"}'
+            f'&nbsp;&nbsp;<strong>{name}</strong>'
+            f'{reason_label}'
+            f'&nbsp;&nbsp;🏆</div>',
+            unsafe_allow_html=True,
+        )
 
 # ── Round Pattern card — full width ───────────────────────────────────────────
 render_pattern_card()
