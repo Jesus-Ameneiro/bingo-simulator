@@ -66,72 +66,51 @@ st.markdown("""
         margin: 6px 0; box-shadow: 0 4px 20px rgba(255,215,0,0.55);
     }
 
-    /* ── GRAY: base style for all cell buttons ── */
-    button[data-testid="baseButton-secondary"] {
-        background-color: #3a3a3a !important;
-        border-color:     #555555 !important;
-        color:            #cccccc !important;
+    /* ── Red = marked cell that matches the pattern (primary button) ── */
+    button[data-testid="baseButton-primary"] {
+        background-color: #c0392b !important;
+        border-color:     #c0392b !important;
+        color:            white   !important;
+        font-weight:      bold    !important;
         font-size:        14px    !important;
-        font-weight:      600     !important;
+        min-height:       46px    !important;
+        border-radius:    6px     !important;
+        padding:          4px 0px !important;
+        width:            100%    !important;
+    }
+    button[data-testid="baseButton-primary"]:hover {
+        background-color: #a93226 !important;
+        border-color:     #a93226 !important;
+    }
+    button[data-testid="baseButton-primary"] p {
+        white-space: nowrap   !important;
+        overflow:    visible  !important;
+        font-size:   14px     !important;
+        margin:      0        !important;
+        line-height: 1.2      !important;
+    }
+
+    /* ── Gray = unmarked or marked-but-not-in-pattern cell (secondary button) ── */
+    button[data-testid="baseButton-secondary"] {
+        background-color: #4a4a4a !important;
+        border-color:     #5a5a5a !important;
+        color:            #d0d0d0 !important;
+        font-size:        14px    !important;
         min-height:       46px    !important;
         border-radius:    6px     !important;
         padding:          4px 0px !important;
         width:            100%    !important;
     }
     button[data-testid="baseButton-secondary"]:hover {
-        background-color: #505050 !important;
-        border-color:     #707070 !important;
-        color:            #ffffff !important;
+        background-color: #5a5a5a !important;
+        border-color:     #6a6a6a !important;
     }
-    button[data-testid="baseButton-secondary"] p,
-    button[data-testid="baseButton-primary"] p {
-        white-space: nowrap  !important;
-        overflow:    visible !important;
-        font-size:   14px    !important;
-        margin:      0       !important;
-        line-height: 1.2     !important;
-    }
-
-    /* ── GREEN: hidden .cell-matched div injected before the button widget ──
-       Streamlit wraps st.markdown → [data-testid="stMarkdown"]
-       and st.button  → [data-testid="stButton"].
-       Both are direct siblings inside [data-testid="stVerticalBlock"]. ── */
-    [data-testid="stMarkdown"]:has(.cell-matched)
-    + [data-testid="stButton"]
-    button[data-testid="baseButton-secondary"] {
-        background-color: #27ae60 !important;
-        border-color:     #1e8449 !important;
-        color:            white   !important;
-        font-weight:      bold    !important;
-    }
-    [data-testid="stMarkdown"]:has(.cell-matched)
-    + [data-testid="stButton"]
-    button[data-testid="baseButton-secondary"]:hover {
-        background-color: #1e8449 !important;
-    }
-
-    /* ── RED: hidden .cell-unmatched div injected before the button widget ── */
-    [data-testid="stMarkdown"]:has(.cell-unmatched)
-    + [data-testid="stButton"]
-    button[data-testid="baseButton-secondary"] {
-        background-color: #c0392b !important;
-        border-color:     #a93226 !important;
-        color:            white   !important;
-        font-weight:      bold    !important;
-    }
-    [data-testid="stMarkdown"]:has(.cell-unmatched)
-    + [data-testid="stButton"]
-    button[data-testid="baseButton-secondary"]:hover {
-        background-color: #a93226 !important;
-    }
-
-    /* ── Keep primary style only for non-cell buttons ── */
-    button[data-testid="baseButton-primary"] {
-        font-size:     14px !important;
-        min-height:    46px !important;
-        border-radius: 6px  !important;
-        padding:       4px 0px !important;
-        width:         100% !important;
+    button[data-testid="baseButton-secondary"] p {
+        white-space: nowrap   !important;
+        overflow:    visible  !important;
+        font-size:   14px     !important;
+        margin:      0        !important;
+        line-height: 1.2      !important;
     }
 
     /* ── Squeeze column gaps inside card containers ── */
@@ -893,43 +872,17 @@ def render_card(idx: int):
                             unsafe_allow_html=True,
                         )
                     else:
-                        marked   = is_marked(idx, r, c)
-                        pattern  = st.session_state.round_pattern
-                        in_pat   = (r, c) in pattern if pattern else False
-
-                        # Determine state
-                        if pattern:
-                            matched   = marked and in_pat
-                            unmatched = marked and not in_pat
-                        else:
-                            matched   = marked      # no pattern → all marked = green
-                            unmatched = False
-
-                        # Inject a hidden marker inside [data-testid="stMarkdown"].
-                        # CSS targets: [data-testid="stMarkdown"]:has(.cell-matched)
-                        #              + [data-testid="stButton"] button
-                        # Use inline <span> — Streamlit always wraps st.markdown
-                        # inline content in <p> inside [data-testid="stMarkdownContainer"].
-                        if matched:
-                            st.markdown(
-                                '<span class="cell-matched" '
-                                'style="display:inline-block;width:0;height:0;'
-                                'overflow:hidden;font-size:0;line-height:0;"></span>',
-                                unsafe_allow_html=True,
-                            )
-                        elif unmatched:
-                            st.markdown(
-                                '<span class="cell-unmatched" '
-                                'style="display:inline-block;width:0;height:0;'
-                                'overflow:hidden;font-size:0;line-height:0;"></span>',
-                                unsafe_allow_html=True,
-                            )
-                        # No marker → gray (default secondary style)
-
+                        marked  = is_marked(idx, r, c)
+                        pattern = st.session_state.round_pattern
+                        # Red (primary) when: no pattern and marked,
+                        #   OR pattern is set and this cell is marked + in the pattern
+                        highlight = marked and (
+                            not pattern or (r, c) in pattern
+                        )
                         if st.button(
                             val,
                             key=f"cell_{idx}_{r}_{c}_{st.session_state.round}",
-                            type="secondary",
+                            type="primary" if highlight else "secondary",
                             use_container_width=True,
                         ):
                             toggle_mark_global(idx, r, c)
